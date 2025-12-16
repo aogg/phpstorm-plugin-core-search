@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.core-search</id>
     <name>核心搜索</name>
-    <version>1.0.9</version>
+    <version>1.0.12</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,15 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.12 - 类解析新增 editor.document 兜底
+    - PSI_FILE 缺失时从编辑器文档获取文件并记录日志
+    
+    1.0.11 - 类解析日志与兜底增强
+    - 无 PSI_ELEMENT 时记录文件/光标缺失原因，提升解析成功率
+    
+    1.0.10 - 修复类解析失败，兜底从文件/光标获取 PHP 类
+    - 右键任意类可展示对应 @core 关键词二级菜单
+    
     1.0.9 - 右键去重，仅保留一个“搜索核心”入口
     - 移除重复的“核心关键词”入口，悬停显示子菜单
     

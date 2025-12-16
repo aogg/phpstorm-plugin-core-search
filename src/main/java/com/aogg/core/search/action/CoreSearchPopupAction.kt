@@ -2,6 +2,7 @@ package com.aogg.core.search.action
 
 import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.editor.Editor
+import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.util.PsiTreeUtil
 import com.aogg.core.search.helper.CoreAnnotationHelper
@@ -48,23 +49,63 @@ class CoreSearchPopupAction : ActionGroup() {
      * 根据右键上下文或光标位置解析 PHP 类
      */
     private fun resolvePhpClass(event: AnActionEvent): PhpClass? {
+        val project = event.project
+
+        // 1) 直接选中类
         val contextElement = event.getData(CommonDataKeys.PSI_ELEMENT)
         if (contextElement is PhpClass) {
-            ProjectLogHelper.log(event.project, "resolvePhpClass: use contextElement direct=${contextElement.fqn}")
+            ProjectLogHelper.log(project, "resolvePhpClass: use contextElement direct=${contextElement.fqn}")
             return contextElement
         }
+
+        // 2) 选中元素向上找类
         val fromContext = contextElement?.let { PsiTreeUtil.getParentOfType(it, PhpClass::class.java) }
         if (fromContext != null) {
-            ProjectLogHelper.log(event.project, "resolvePhpClass: from context parent=${fromContext.fqn}")
+            ProjectLogHelper.log(project, "resolvePhpClass: from context parent=${fromContext.fqn}")
             return fromContext
         }
 
-        val editor = event.getData(CommonDataKeys.EDITOR) ?: return null
-        val psiFile = event.getData(CommonDataKeys.PSI_FILE) ?: return null
+        // 3) 文件内首个类（无 PSI_ELEMENT 时兜底）
+        val psiFile = event.getData(CommonDataKeys.PSI_FILE)
+        if (psiFile != null) {
+            val classInFile = PsiTreeUtil.findChildOfType(psiFile, PhpClass::class.java)
+            if (classInFile != null) {
+                ProjectLogHelper.log(project, "resolvePhpClass: from file firstClass=${classInFile.fqn}")
+                return classInFile
+            } else {
+                ProjectLogHelper.log(project, "resolvePhpClass: psiFile present but no PhpClass in file=${psiFile.name}")
+            }
+        } else {
+            ProjectLogHelper.log(project, "resolvePhpClass: psiFile null in dataContext")
+        }
+
+        // 4) 光标所在位置向上找类
+        val editor = event.getData(CommonDataKeys.EDITOR)
+        if (editor == null) {
+            ProjectLogHelper.log(project, "resolvePhpClass: editor null, cannot resolve from caret")
+            return null
+        }
+        val psiFileFromEditor = psiFile
+            ?: event.getData(CommonDataKeys.PSI_FILE)
+            ?: project?.let { PsiDocumentManager.getInstance(it).getPsiFile(editor.document) }
+        if (psiFileFromEditor == null) {
+            ProjectLogHelper.log(project, "resolvePhpClass: psiFileFromEditor null (editor doc lookup failed), cannot resolve from caret")
+            return null
+        } else if (psiFile == null) {
+            ProjectLogHelper.log(project, "resolvePhpClass: psiFile resolved from editor.document file=${psiFileFromEditor.name}")
+        }
         val offset = editor.caretModel.offset
-        val elementAtCaret = psiFile.findElementAt(offset) ?: return null
-        ProjectLogHelper.log(event.project, "resolvePhpClass: from caret offset=$offset element=${elementAtCaret.node?.elementType}")
-        return PsiTreeUtil.getParentOfType(elementAtCaret, PhpClass::class.java)
+        val elementAtCaret = psiFileFromEditor.findElementAt(offset)
+        if (elementAtCaret == null) {
+            ProjectLogHelper.log(project, "resolvePhpClass: elementAtCaret null offset=$offset file=${psiFileFromEditor.name}")
+            return null
+        }
+        ProjectLogHelper.log(project, "resolvePhpClass: from caret offset=$offset element=${elementAtCaret.node?.elementType}")
+        val classFromCaret = PsiTreeUtil.getParentOfType(elementAtCaret, PhpClass::class.java)
+        if (classFromCaret == null) {
+            ProjectLogHelper.log(project, "resolvePhpClass: parent PhpClass not found from caret")
+        }
+        return classFromCaret
     }
 
     override fun update(e: AnActionEvent) {
