@@ -2,56 +2,41 @@ package com.aogg.core.search.action
 
 import com.aogg.core.search.helper.CoreAnnotationHelper
 import com.aogg.core.search.helper.ProjectLogHelper
-import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.actionSystem.DataContext
-import com.intellij.openapi.actionSystem.AnAction
-import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.project.DumbAware
-import com.intellij.openapi.ui.Messages
 import com.intellij.psi.util.PsiTreeUtil
-import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.jetbrains.php.lang.psi.elements.PhpClass
 
 /**
  * 固定显示的核心搜索入口
- * 允许在编辑器右键菜单中始终显示，选择关键词后触发搜索
+ * 作为二级菜单，展示公开方法的 @core 关键词
  */
-class CoreSearchAction : AnAction("搜索核心"), DumbAware {
+class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索方法调用位置", null), DumbAware {
 
-    override fun actionPerformed(e: AnActionEvent) {
-        val project = e.project ?: return
-        val phpClass = resolvePhpClass(e.dataContext)
-        if (phpClass == null) {
-            ProjectLogHelper.log(project, "CoreSearchAction.actionPerformed: phpClass null")
-            Messages.showInfoMessage(project, "未找到 PHP 类，请将光标放在类定义内。", "核心搜索")
-            return
+    override fun getChildren(e: AnActionEvent?): Array<AnAction> {
+        if (e == null) return emptyArray()
+
+        val phpClass = resolvePhpClass(e.dataContext) ?: run {
+            ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: phpClass null")
+            return arrayOf(CoreSearchInfoAction("未找到 PHP 类"))
         }
 
-        val keywords = CoreAnnotationHelper.getAllUniqueKeywords(phpClass)
+        if (!CoreAnnotationHelper.hasCoreAnnotation(phpClass)) {
+            ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: no core annotations for class=${phpClass.fqn}")
+            return arrayOf(CoreSearchInfoAction("未找到 @core 注解"))
+        }
+
+        val keywords = CoreAnnotationHelper.getAllUniqueKeywords(phpClass).sorted()
         if (keywords.isEmpty()) {
-            ProjectLogHelper.log(project, "CoreSearchAction.actionPerformed: keywords empty class=${phpClass.fqn}")
-            Messages.showInfoMessage(project, "未找到 @core 关键词。", "核心搜索")
-            return
+            ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: keywords empty for class=${phpClass.fqn}")
+            return arrayOf(CoreSearchInfoAction("未找到 @core 关键词"))
         }
 
-        if (keywords.size == 1) {
-            val keyword = keywords.first()
-            ProjectLogHelper.log(project, "CoreSearchAction.actionPerformed: single keyword=$keyword class=${phpClass.fqn}")
-            CoreKeywordSearchAction(keyword, phpClass).actionPerformed(e)
-            return
-        }
-
-        val keywordList = keywords.sorted()
-        ProjectLogHelper.log(project, "CoreSearchAction.actionPerformed: show chooser keywords=$keywordList class=${phpClass.fqn}")
-        JBPopupFactory.getInstance()
-            .createPopupChooserBuilder(keywordList)
-            .setTitle("选择核心关键词")
-            .setItemChosenCallback { keyword ->
-                ProjectLogHelper.log(project, "CoreSearchAction.actionPerformed: choose keyword=$keyword class=${phpClass.fqn}")
-                CoreKeywordSearchAction(keyword, phpClass).actionPerformed(e)
-            }
-            .createPopup()
-            .showInBestPositionFor(e.dataContext)
+        val actions = keywords.map { keyword ->
+            CoreKeywordSearchAction(keyword, phpClass) as AnAction
+        }.toTypedArray()
+        ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: class=${phpClass.fqn}, keywords=$keywords, actions=${actions.size}")
+        return actions
     }
 
     override fun update(e: AnActionEvent) {
@@ -60,16 +45,20 @@ class CoreSearchAction : AnAction("搜索核心"), DumbAware {
         e.presentation.description = "根据 @core 注解搜索方法调用位置"
     }
 
+    override fun isPopup(): Boolean = true
+
     /**
      * 根据上下文解析 PHP 类
      */
     private fun resolvePhpClass(dataContext: DataContext): PhpClass? {
         val contextElement = CommonDataKeys.PSI_ELEMENT.getData(dataContext)
         if (contextElement is PhpClass) {
+            ProjectLogHelper.log(null, "CoreSearchAction.resolvePhpClass: use contextElement direct=${contextElement.fqn}")
             return contextElement
         }
         val fromContext = contextElement?.let { PsiTreeUtil.getParentOfType(it, PhpClass::class.java) }
         if (fromContext != null) {
+            ProjectLogHelper.log(null, "CoreSearchAction.resolvePhpClass: from context parent=${fromContext.fqn}")
             return fromContext
         }
 
@@ -77,7 +66,21 @@ class CoreSearchAction : AnAction("搜索核心"), DumbAware {
         val psiFile = CommonDataKeys.PSI_FILE.getData(dataContext) ?: return null
         val offset = editor.caretModel.offset
         val elementAtCaret = psiFile.findElementAt(offset) ?: return null
+        ProjectLogHelper.log(null, "CoreSearchAction.resolvePhpClass: from caret offset=$offset element=${elementAtCaret.node?.elementType}")
         return PsiTreeUtil.getParentOfType(elementAtCaret, PhpClass::class.java)
+    }
+
+    /**
+     * 当无法生成具体关键词子项时的占位动作
+     */
+    private class CoreSearchInfoAction(text: String) : AnAction(text) {
+        override fun actionPerformed(e: AnActionEvent) {
+            // 占位动作，不执行任何操作
+        }
+
+        override fun update(e: AnActionEvent) {
+            e.presentation.isEnabled = false
+        }
     }
 }
 

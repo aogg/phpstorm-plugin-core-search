@@ -87,6 +87,9 @@ object CoreAnnotationHelper {
     private fun hasCoreAnnotationInClass(phpClass: PhpClass): Boolean {
         val methods = phpClass.methods
         for (method in methods) {
+            if (!method.access.isPublic) {
+                continue
+            }
             val keywords = extractCoreKeywords(method)
             if (keywords.isNotEmpty()) {
                 return true
@@ -127,6 +130,9 @@ object CoreAnnotationHelper {
     private fun collectCoreMethods(phpClass: PhpClass, result: MutableMap<Method, List<String>>) {
         val methods = phpClass.methods
         for (method in methods) {
+            if (!method.access.isPublic) {
+                continue
+            }
             val keywords = extractCoreKeywords(method)
             if (keywords.isNotEmpty()) {
                 result[method] = keywords
@@ -160,6 +166,9 @@ object CoreAnnotationHelper {
      * @return 如果方法有该关键词则返回 true
      */
     fun hasKeyword(method: Method, keyword: String): Boolean {
+        if (!method.access.isPublic) {
+            return false
+        }
         val keywords = extractCoreKeywords(method)
         return keywords.contains(keyword)
     }

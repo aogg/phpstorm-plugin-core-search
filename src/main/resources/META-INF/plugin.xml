@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.core-search</id>
     <name>核心搜索</name>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,9 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.7 - 仅公开方法的 @core 关键词生成二级菜单
+    - 关键词收集限定公开方法，避免私有方法干扰
+    
     1.0.6 - 右键菜单固定显示，增加关键词选择入口
     - 新增固定入口动作，缺少关键词时提示
     - 关键词子菜单始终可见并提示缺失原因
@@ -57,12 +60,13 @@
                description="按 @core 关键词搜索调用位置">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </group>
-        <action id="com.aogg.core.search.CoreSearchAction"
-                class="com.aogg.core.search.action.CoreSearchAction"
-                text="搜索核心"
-                description="根据 @core 注解搜索方法调用位置">
+        <group id="com.aogg.core.search.CoreSearchAction"
+               class="com.aogg.core.search.action.CoreSearchAction"
+               popup="true"
+               text="搜索核心"
+               description="根据 @core 注解搜索方法调用位置">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-        </action>
+        </group>
     </actions>
 </idea-plugin>
 
