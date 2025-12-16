@@ -19,7 +19,7 @@ class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索�
 
         val phpClass = resolvePhpClass(e.dataContext) ?: run {
             ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: phpClass null")
-            return arrayOf(CoreSearchInfoAction("未找到 PHP 类"))
+            return arrayOf(CoreSearchInfoAction("未找到 有方法@core"))
         }
 
         if (!CoreAnnotationHelper.hasCoreAnnotation(phpClass)) {
