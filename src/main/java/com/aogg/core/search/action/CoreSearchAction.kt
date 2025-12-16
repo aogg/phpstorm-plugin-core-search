@@ -46,8 +46,6 @@ class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索�
         e.presentation.isPopupGroup = true
     }
 
-    override fun isPopup(): Boolean = true
-
     /**
      * 根据上下文解析 PHP 类
      */

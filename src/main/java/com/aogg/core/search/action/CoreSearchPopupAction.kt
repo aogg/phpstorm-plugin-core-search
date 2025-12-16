@@ -82,10 +82,6 @@ class CoreSearchPopupAction : ActionGroup() {
         }
     }
 
-    override fun isPopup(): Boolean {
-        return true
-    }
-
     /**
      * 当无法生成具体关键词子项时的占位动作
      */

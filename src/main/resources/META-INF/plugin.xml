@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.core-search</id>
     <name>核心搜索</name>
-    <version>1.0.7</version>
+    <version>1.0.8</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,9 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.8 - 修复 2025.1 上 isPopup 覆盖导致的加载异常
+    - 移除对 final isPopup 的覆盖，保持子菜单展示
+    
     1.0.7 - 仅公开方法的 @core 关键词生成二级菜单
     - 关键词收集限定公开方法，避免私有方法干扰
     
