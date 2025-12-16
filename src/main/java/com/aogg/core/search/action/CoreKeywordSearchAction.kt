@@ -1,22 +1,24 @@
 package com.aogg.core.search.action
 
+import com.aogg.core.search.helper.CoreAnnotationHelper
+import com.aogg.core.search.helper.ProjectLogHelper
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.project.Project
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationType
+import com.intellij.notification.Notifications
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.searches.ReferencesSearch
+import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.usageView.UsageInfo
 import com.intellij.usages.Usage
 import com.intellij.usages.UsageInfo2UsageAdapter
 import com.intellij.usages.UsageTarget
 import com.intellij.usages.UsageViewManager
 import com.intellij.usages.UsageViewPresentation
-import com.intellij.find.findUsages.FindUsagesManager
-import com.intellij.find.findUsages.FindUsagesOptions
-import com.intellij.usageView.UsageInfo
-import com.intellij.psi.search.searches.ReferencesSearch
-import com.intellij.psi.PsiReference
 import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
-import com.aogg.core.search.helper.CoreAnnotationHelper
 
 /**
  * 关键词搜索动作
@@ -32,25 +34,53 @@ class CoreKeywordSearchAction(
         
         // 获取当前类中所有带有该关键词的方法
         val targetMethods = getMethodsWithKeyword(phpClass, keyword)
+        if (targetMethods.isNotEmpty()) {
+            val methodInfos = targetMethods.map { method ->
+                val classFqn = (method.containingClass as? PhpClass)?.fqn ?: "<no-class>"
+                "$classFqn::${method.name}"
+            }
+            ProjectLogHelper.log(
+                project,
+                "搜索CoreKeywordSearchAction: keyword=$keyword, targetMethods=${methodInfos.joinToString("; ")}"
+            )
+        }
         
         if (targetMethods.isEmpty()) {
+            notifyInfo(project, "未找到包含 @$keyword 的方法")
+            ProjectLogHelper.log(project, "CoreKeywordSearchAction: no methods with keyword=$keyword in class=${phpClass.fqn}")
             return
         }
         
         // 收集所有符合条件的用法
         val usages = mutableListOf<Usage>()
+        var totalUsages = 0
         
         for (method in targetMethods) {
-            val methodUsages = findMethodUsages(project, method)
-            
-            // 过滤：只保留调用处的方法有对应 @core 关键词的用法
-            val filteredUsages = filterUsagesByKeyword(methodUsages, keyword)
-            usages.addAll(filteredUsages)
+            // 如果方法定义在父类中，则只统计“当前类自身”对该方法的调用
+            val isFromSuperClass = method.containingClass != null && method.containingClass != phpClass
+            val limitToClass = if (isFromSuperClass) phpClass else null
+            val methodUsages = findMethodUsages(project, method, limitToClass)
+            totalUsages += methodUsages.size
+            usages.addAll(methodUsages.map { UsageInfo2UsageAdapter(it) })
         }
         
         // 显示搜索结果
         if (usages.isNotEmpty()) {
+            val usageInfos = usages.mapNotNull { usage ->
+                val info = (usage as? UsageInfo2UsageAdapter)?.usageInfo
+                val element = info?.element ?: return@mapNotNull null
+                val classFqn = PsiTreeUtil.getParentOfType(element, PhpClass::class.java)?.fqn ?: "<no-class>"
+                val methodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
+                "$classFqn::$methodName"
+            }
+            ProjectLogHelper.log(
+                project,
+                "搜索CoreKeywordSearchAction: show usages keyword=$keyword, usageList=${usageInfos.joinToString(",")}"
+            )
             showUsages(project, usages, keyword)
+        } else {
+            notifyInfo(project, "未找到调用 @$keyword 的代码位置")
+            ProjectLogHelper.log(project, "CoreKeywordSearchAction: no usages found keyword=$keyword methods=${targetMethods.size}")
         }
     }
     
@@ -58,77 +88,44 @@ class CoreKeywordSearchAction(
      * 获取类中所有带有指定关键词的方法
      */
     private fun getMethodsWithKeyword(phpClass: PhpClass, keyword: String): List<Method> {
-        val result = mutableListOf<Method>()
         val coreMethods = CoreAnnotationHelper.getAllCoreMethods(phpClass)
-        
-        for ((method, keywords) in coreMethods) {
-            if (keywords.contains(keyword)) {
-                result.add(method)
-            }
-        }
-        
-        return result
+        return coreMethods[keyword]?.toList() ?: emptyList()
     }
     
     /**
      * 查找方法的调用位置
+     *
+     * @param limitToClass 如果不为 null，则只保留位于该类内部的调用（用于父类方法，只看当前类对它的调用）
      */
-    private fun findMethodUsages(project: Project, method: Method): List<UsageInfo> {
+    private fun findMethodUsages(
+        project: Project,
+        method: Method,
+        limitToClass: PhpClass?
+    ): List<UsageInfo> {
         val usages = mutableListOf<UsageInfo>()
         val searchScope = GlobalSearchScope.projectScope(project)
-        
+
         // 使用 ReferencesSearch 查找方法引用
         val references = ReferencesSearch.search(method, searchScope, false)
-        
+
         for (reference in references) {
             val element = reference.element
             val range = reference.rangeInElement
+
+            // 如果需要限制到“当前类”，则只保留位于该类内部的调用
+            if (limitToClass != null) {
+                val callerClass = PsiTreeUtil.getParentOfType(element, PhpClass::class.java)
+                if (callerClass == null || callerClass != limitToClass) {
+                    continue
+                }
+            }
+
             usages.add(UsageInfo(element, range.startOffset, range.endOffset, true))
         }
-        
+
         return usages
     }
-    
-    /**
-     * 过滤用法：只保留调用处的方法有对应 @core 关键词的用法
-     */
-    private fun filterUsagesByKeyword(
-        usages: List<UsageInfo>,
-        keyword: String
-    ): List<Usage> {
-        val result = mutableListOf<Usage>()
         
-        for (usageInfo in usages) {
-            val element = usageInfo.element ?: continue
-            
-            // 查找包含该元素的 PHP 方法
-            val callingMethod = findContainingMethod(element) ?: continue
-            
-            // 检查调用方法是否有对应的 @core 关键词
-            if (CoreAnnotationHelper.hasKeyword(callingMethod, keyword)) {
-                result.add(UsageInfo2UsageAdapter(usageInfo))
-            }
-        }
-        
-        return result
-    }
-    
-    /**
-     * 查找包含指定元素的 PHP 方法
-     */
-    private fun findContainingMethod(element: com.intellij.psi.PsiElement): Method? {
-        var current: com.intellij.psi.PsiElement? = element
-        
-        while (current != null) {
-            if (current is Method) {
-                return current
-            }
-            current = current.parent
-        }
-        
-        return null
-    }
-    
     /**
      * 显示用法搜索结果
      */
@@ -143,6 +140,21 @@ class CoreKeywordSearchAction(
             usageTargets,
             usages.toTypedArray(),
             presentation
+        )
+    }
+    
+    /**
+     * 结果提示通知
+     */
+    private fun notifyInfo(project: Project, content: String) {
+        Notifications.Bus.notify(
+            Notification(
+                "core-search",
+                "核心搜索",
+                content,
+                NotificationType.INFORMATION
+            ),
+            project
         )
     }
 }

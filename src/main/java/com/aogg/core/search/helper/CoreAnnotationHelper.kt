@@ -99,17 +99,17 @@ object CoreAnnotationHelper {
     }
     
     /**
-     * 获取类及其父类中所有带有 @core 注解的方法及其关键词
-     * 
+     * 获取类及其父类中所有带有 @core 注解的方法
+     *
      * @param phpClass PHP 类元素
-     * @return 方法到关键词列表的映射
+     * @return 关键词到方法列表的映射
      */
-    fun getAllCoreMethods(phpClass: PhpClass): Map<Method, List<String>> {
-        val result = mutableMapOf<Method, List<String>>()
-        
+    fun getAllCoreMethods(phpClass: PhpClass): Map<String, List<Method>> {
+        val result = mutableMapOf<String, MutableList<Method>>()
+
         // 收集当前类的方法
         collectCoreMethods(phpClass, result)
-        
+
         // 收集父类的方法
         val superClasses = phpClass.supers
         for (superClass in superClasses) {
@@ -117,17 +117,17 @@ object CoreAnnotationHelper {
                 collectCoreMethods(superClass, result)
             }
         }
-        
+
         return result
     }
-    
+
     /**
      * 收集类中所有带有 @core 注解的方法
-     * 
+     *
      * @param phpClass PHP 类元素
-     * @param result 结果映射
+     * @param result 结果映射（关键词 -> 方法列表）
      */
-    private fun collectCoreMethods(phpClass: PhpClass, result: MutableMap<Method, List<String>>) {
+    private fun collectCoreMethods(phpClass: PhpClass, result: MutableMap<String, MutableList<Method>>) {
         val methods = phpClass.methods
         for (method in methods) {
             if (!method.access.isPublic) {
@@ -135,27 +135,24 @@ object CoreAnnotationHelper {
             }
             val keywords = extractCoreKeywords(method)
             if (keywords.isNotEmpty()) {
-                result[method] = keywords
+                for (keyword in keywords) {
+                    val list = result.getOrPut(keyword) { mutableListOf() }
+                    list.add(method)
+                }
                 ProjectLogHelper.log(phpClass.project, "collectCoreMethods: class=${phpClass.fqn}, method=${method.name}, keywords=$keywords")
             }
         }
     }
-    
+
     /**
      * 获取类及其父类中所有唯一的 @core 关键词
-     * 
+     *
      * @param phpClass PHP 类元素
      * @return 唯一关键词集合
      */
     fun getAllUniqueKeywords(phpClass: PhpClass): Set<String> {
-        val keywords = mutableSetOf<String>()
         val coreMethods = getAllCoreMethods(phpClass)
-        
-        for ((_, keywordList) in coreMethods) {
-            keywords.addAll(keywordList)
-        }
-        
-        return keywords
+        return coreMethods.keys
     }
     
     /**
