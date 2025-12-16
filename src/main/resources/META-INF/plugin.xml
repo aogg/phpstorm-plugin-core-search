@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.aogg.core-search</id>
     <name>核心搜索</name>
-    <version>1.0.8</version>
+    <version>1.0.9</version>
     <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
 
     <description><![CDATA[
@@ -14,6 +14,9 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    1.0.9 - 右键去重，仅保留一个“搜索核心”入口
+    - 移除重复的“核心关键词”入口，悬停显示子菜单
+    
     1.0.8 - 修复 2025.1 上 isPopup 覆盖导致的加载异常
     - 移除对 final isPopup 的覆盖，保持子菜单展示
     
@@ -56,13 +59,6 @@
     </extensions>
 
     <actions>
-        <group id="com.aogg.core.search.CoreSearchPopupGroup"
-               class="com.aogg.core.search.action.CoreSearchPopupAction"
-               popup="true"
-               text="核心关键词"
-               description="按 @core 关键词搜索调用位置">
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-        </group>
         <group id="com.aogg.core.search.CoreSearchAction"
                class="com.aogg.core.search.action.CoreSearchAction"
                popup="true"
