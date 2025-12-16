@@ -1,0 +1,47 @@
+<idea-plugin>
+    <id>com.aogg.core-search</id>
+    <name>核心搜索</name>
+    <version>1.0.1</version>
+    <vendor email="aogg@example.com" url="https://github.com/aogg">aogg</vendor>
+
+    <description><![CDATA[
+    一个 PhpStorm 插件，用于根据 @core 注解搜索方法调用位置。
+
+    功能特性：
+    - 解析方法 PHPDoc 中的 @core 关键词注解
+    - 在类右键菜单中动态显示"搜索核心"选项
+    - 支持按关键词搜索调用当前类方法的位置
+    ]]></description>
+
+    <change-notes><![CDATA[
+    1.0.1 - 修复编译警告
+    - 移除未使用的参数
+    - 优化代码质量
+    
+    1.0.0 - 初始版本
+    - 实现 @core 注解解析
+    - 实现右键菜单动态显示
+    - 实现关键词搜索功能
+    ]]></change-notes>
+
+    <!-- 兼容的 IDE 版本 -->
+    <idea-version since-build="233" until-build="241.*"/>
+
+    <!-- 依赖的插件 -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.jetbrains.php</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+    </extensions>
+
+    <actions>
+        <group id="com.aogg.core.search.CoreSearchPopupGroup"
+               class="com.aogg.core.search.action.CoreSearchPopupAction"
+               popup="true"
+               text="搜索核心"
+               description="根据 @core 注解搜索方法调用位置">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </group>
+    </actions>
+</idea-plugin>
+
