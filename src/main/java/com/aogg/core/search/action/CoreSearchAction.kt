@@ -43,6 +43,7 @@ class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索�
         e.presentation.isEnabledAndVisible = true
         e.presentation.text = "搜索核心"
         e.presentation.description = "根据 @core 注解搜索方法调用位置"
+        e.presentation.isPopupGroup = true
     }
 
     override fun isPopup(): Boolean = true
