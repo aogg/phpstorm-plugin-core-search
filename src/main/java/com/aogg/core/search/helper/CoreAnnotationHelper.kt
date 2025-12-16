@@ -1,7 +1,8 @@
 package com.aogg.core.search.helper
 
-import com.jetbrains.php.lang.psi.elements.*
 import com.jetbrains.php.lang.documentation.phpdoc.psi.PhpDocComment
+import com.jetbrains.php.lang.psi.elements.Method
+import com.jetbrains.php.lang.psi.elements.PhpClass
 import java.util.regex.Pattern
 
 /**
@@ -21,7 +22,11 @@ object CoreAnnotationHelper {
      */
     fun extractCoreKeywords(method: Method): List<String> {
         val docComment = method.docComment ?: return emptyList()
-        return extractCoreKeywordsFromDocComment(docComment)
+        val keywords = extractCoreKeywordsFromDocComment(docComment)
+        if (keywords.isNotEmpty()) {
+            ProjectLogHelper.log(method.project, "extractCoreKeywords: method=${method.name}, keywords=$keywords")
+        }
+        return keywords
     }
     
     /**
@@ -41,6 +46,9 @@ object CoreAnnotationHelper {
                 keywords.add(keyword)
             }
         }
+        if (keywords.isNotEmpty()) {
+            ProjectLogHelper.log(docComment.project, "extractCoreKeywordsFromDocComment: keywords=$keywords")
+        }
         
         return keywords
     }
@@ -54,6 +62,7 @@ object CoreAnnotationHelper {
     fun hasCoreAnnotation(phpClass: PhpClass): Boolean {
         // 检查当前类
         if (hasCoreAnnotationInClass(phpClass)) {
+            ProjectLogHelper.log(phpClass.project, "hasCoreAnnotation: class=${phpClass.fqn} self=true")
             return true
         }
         
@@ -61,6 +70,7 @@ object CoreAnnotationHelper {
         val superClasses = phpClass.supers
         for (superClass in superClasses) {
             if (superClass is PhpClass && hasCoreAnnotationInClass(superClass)) {
+                ProjectLogHelper.log(phpClass.project, "hasCoreAnnotation: class=${phpClass.fqn} inherit=${superClass.fqn}")
                 return true
             }
         }
@@ -120,6 +130,7 @@ object CoreAnnotationHelper {
             val keywords = extractCoreKeywords(method)
             if (keywords.isNotEmpty()) {
                 result[method] = keywords
+                ProjectLogHelper.log(phpClass.project, "collectCoreMethods: class=${phpClass.fqn}, method=${method.name}, keywords=$keywords")
             }
         }
     }
