@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+out/
+*.iml
+.idea/
+
+# IntelliJ IDEA
+*.iws
+*.ipr
+
+# Build outputs
+*.jar
+*.war
+*.zip
+*.tar.gz
+distributions/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
