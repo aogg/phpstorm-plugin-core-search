@@ -287,10 +287,28 @@ class CoreKeywordSearchAction(
                             matched = true
                             return resolved
                         }
+                        // 兜底规则：类名相同也认为相关（例如不同命名空间但类名相同的 StoreSubOrderIncome）
+                        if (resolved.name == phpClass.name) {
+                            ProjectLogHelper.log(
+                                methodReference.project,
+                                "filterRelatedUsages: 匹配静态调用（类名相同）resolved=${resolved.fqn}, target=${phpClass.fqn}"
+                            )
+                            matched = true
+                            return resolved
+                        }
                     }
                 }
 
                 if (!matched) {
+                    // 当索引未能解析或都不匹配时，按短类名兜底：只要静态类名等于目标类名就认为相关
+                    if (className == phpClass.name) {
+                        ProjectLogHelper.log(
+                            methodReference.project,
+                            "filterRelatedUsages: 静态调用按类名兜底匹配 className=$className, target=${phpClass.fqn}"
+                        )
+                        return phpClass
+                    }
+
                     ProjectLogHelper.log(
                         methodReference.project,
                         "filterRelatedUsages: 静态调用类型不匹配，classReference=$className, target=${phpClass.fqn}"

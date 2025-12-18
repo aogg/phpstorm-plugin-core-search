@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.aogg"
-version = "1.0.35"
+version = "1.0.37"
 
 repositories {
     mavenCentral()
