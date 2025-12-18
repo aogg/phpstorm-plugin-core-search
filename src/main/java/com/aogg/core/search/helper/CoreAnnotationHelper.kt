@@ -69,12 +69,36 @@ object CoreAnnotationHelper {
             return true
         }
         
-        // 检查父类
+        // 递归检查所有祖先类
+        val visited = mutableSetOf<String>()
+        return hasCoreAnnotationInAncestors(phpClass, visited)
+    }
+    
+    /**
+     * 递归检查所有祖先类是否有 @core 注解的方法
+     * 
+     * @param phpClass PHP 类元素
+     * @param visited 已访问的类集合，用于避免循环引用
+     * @return 如果祖先类有 @core 注解的方法则返回 true
+     */
+    private fun hasCoreAnnotationInAncestors(phpClass: PhpClass, visited: MutableSet<String>): Boolean {
+        val fqn = phpClass.fqn ?: return false
+        if (visited.contains(fqn)) {
+            return false // 避免循环引用
+        }
+        visited.add(fqn)
+        
         val superClasses = phpClass.supers
         for (superClass in superClasses) {
-            if (superClass is PhpClass && hasCoreAnnotationInClass(superClass)) {
-                ProjectLogHelper.log(phpClass.project, "hasCoreAnnotation: class=${phpClass.fqn} inherit=${superClass.fqn}")
-                return true
+            if (superClass is PhpClass) {
+                if (hasCoreAnnotationInClass(superClass)) {
+                    ProjectLogHelper.log(phpClass.project, "hasCoreAnnotation: class=${phpClass.fqn} inherit=${superClass.fqn}")
+                    return true
+                }
+                // 递归检查父类的父类
+                if (hasCoreAnnotationInAncestors(superClass, visited)) {
+                    return true
+                }
             }
         }
         
@@ -109,19 +133,43 @@ object CoreAnnotationHelper {
      */
     fun getAllCoreMethods(phpClass: PhpClass): Map<String, List<Method>> {
         val result = mutableMapOf<String, MutableList<Method>>()
+        val visited = mutableSetOf<String>()
 
         // 收集当前类的方法
         collectCoreMethods(phpClass, result)
 
-        // 收集父类的方法
+        // 递归收集所有祖先类的方法
+        collectCoreMethodsFromAncestors(phpClass, result, visited)
+
+        return result
+    }
+    
+    /**
+     * 递归收集所有祖先类中带有 @core 注解的方法
+     *
+     * @param phpClass PHP 类元素
+     * @param result 结果映射（关键词 -> 方法列表）
+     * @param visited 已访问的类集合，用于避免循环引用
+     */
+    private fun collectCoreMethodsFromAncestors(
+        phpClass: PhpClass,
+        result: MutableMap<String, MutableList<Method>>,
+        visited: MutableSet<String>
+    ) {
+        val fqn = phpClass.fqn ?: return
+        if (visited.contains(fqn)) {
+            return // 避免循环引用
+        }
+        visited.add(fqn)
+        
         val superClasses = phpClass.supers
         for (superClass in superClasses) {
             if (superClass is PhpClass) {
                 collectCoreMethods(superClass, result)
+                // 递归收集父类的父类
+                collectCoreMethodsFromAncestors(superClass, result, visited)
             }
         }
-
-        return result
     }
 
     /**

@@ -65,12 +65,18 @@ class CoreKeywordSearchAction(
         var totalUsages = 0
         
         for (method in targetMethods) {
-            // 如果方法定义在父类中，则只统计“当前类自身”对该方法的调用
-            val isFromSuperClass = method.containingClass != null && method.containingClass != phpClass
-            val limitToClass = if (isFromSuperClass) phpClass else null
-            val methodUsages = findMethodUsages(project, method, limitToClass)
-            totalUsages += methodUsages.size
-            usages.addAll(methodUsages.map { UsageInfo2UsageAdapter(it) })
+            // 先搜索整个项目的方法调用
+            val allMethodUsages = findMethodUsages(project, method, null)
+            totalUsages += allMethodUsages.size
+            
+            // 二次过滤：只保留和当前类相关的调用
+            val filteredUsages = filterRelatedUsages(allMethodUsages, phpClass)
+            val methodClass = (method.containingClass as? PhpClass)?.fqn ?: "<no-class>"
+            ProjectLogHelper.log(
+                project,
+                "二次过滤: method=$methodClass::${method.name}, 过滤前=${allMethodUsages.size}, 过滤后=${filteredUsages.size}"
+            )
+            usages.addAll(filteredUsages.map { UsageInfo2UsageAdapter(it) })
         }
         
         // 显示搜索结果
@@ -115,13 +121,19 @@ class CoreKeywordSearchAction(
         val searchScope = GlobalSearchScope.projectScope(project)
 
         // 使用 ReferencesSearch 查找方法引用
+        val methodClass = (method.containingClass as? PhpClass)?.fqn ?: "<no-class>"
+        ProjectLogHelper.log(project, "findMethodUsages: 开始搜索方法引用 method=$methodClass::${method.name}, limitToClass=${limitToClass?.fqn ?: "null"}")
+        
         val references = ReferencesSearch.search(method, searchScope, false)
+        val referencesList = references.findAll()
+        
+        ProjectLogHelper.log(project, "findMethodUsages: 找到方法引用数量 method=$methodClass::${method.name}, count=${referencesList.size}")
 
-        for (reference in references) {
+        for (reference in referencesList) {
             val element = reference.element
             val range = reference.rangeInElement
 
-            // 如果需要限制到“当前类”，则只保留位于该类内部的调用
+            // 如果需要限制到"当前类"，则只保留位于该类内部的调用
             if (limitToClass != null) {
                 val callerClass = PsiTreeUtil.getParentOfType(element, PhpClass::class.java)
                 if (callerClass == null || callerClass != limitToClass) {
@@ -132,7 +144,247 @@ class CoreKeywordSearchAction(
             usages.add(UsageInfo(element, range.startOffset, range.endOffset, true))
         }
 
+        ProjectLogHelper.log(project, "findMethodUsages: 返回用法数量 method=$methodClass::${method.name}, usages=${usages.size}")
         return usages
+    }
+    
+    /**
+     * 二次过滤：只保留和当前类相关的调用
+     * 检查调用方的对象类型或静态调用的类是否为当前类或其子类
+     * 
+     * @param usages 所有方法调用
+     * @param phpClass 当前类
+     * @return 过滤后的调用列表
+     */
+    private fun filterRelatedUsages(usages: List<UsageInfo>, phpClass: PhpClass): List<UsageInfo> {
+        val filteredUsages = mutableListOf<UsageInfo>()
+        
+        for (usage in usages) {
+            val element = usage.element
+            if (element == null) {
+                ProjectLogHelper.log(
+                    phpClass.project,
+                    "filterRelatedUsages: 二次过滤跳过用法，element 为空"
+                )
+                continue
+            }
+
+            // 仅通过 MethodReference + 类型判断来确认是否与当前类相关
+            val methodReference = PsiTreeUtil.getParentOfType(
+                element,
+                com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                /* strict = */ false
+            )
+
+            if (methodReference == null) {
+                ProjectLogHelper.log(
+                    element.project,
+                    "filterRelatedUsages: 二次过滤未匹配，原因=未找到 MethodReference，elementClass=${element.javaClass.name}, elementText=${element.text}"
+                )
+                continue
+            }
+
+            // 检查调用方的类型
+            val callerType = getCallerType(methodReference, phpClass)
+            if (callerType != null) {
+                filteredUsages.add(usage)
+                continue
+            }
+
+            // getCallerType 返回 null，说明类型判断未通过
+            ProjectLogHelper.log(
+                element.project,
+                "filterRelatedUsages: 二次过滤未匹配，原因=调用方类型与当前类无关，methodText=${methodReference.text}, targetClass=${phpClass.fqn}"
+            )
+        }
+        
+        return filteredUsages
+    }
+    
+    /**
+     * 获取方法调用方的类型，判断是否和当前类相关
+     * 
+     * @param methodReference 方法引用
+     * @param phpClass 当前类
+     * @return 如果调用方类型和当前类相关则返回类型，否则返回 null
+     */
+    private fun getCallerType(
+        methodReference: com.jetbrains.php.lang.psi.elements.MethodReference,
+        phpClass: PhpClass
+    ): PhpClass? {
+        val classReference = methodReference.classReference
+        
+        // 先判断是否为“真正的静态调用”：classReference 存在且不是变量名（以 $ 开头的当成变量）
+        if (classReference != null) {
+            val className = classReference.text
+            if (className.isNotEmpty() && !className.startsWith("$")) {
+                // 静态调用：如 ClassName::method() 或 self::method()
+                ProjectLogHelper.log(
+                    methodReference.project,
+                    "filterRelatedUsages: 检查静态调用 classReference=$className"
+                )
+                
+                val phpIndex = com.jetbrains.php.PhpIndex.getInstance(methodReference.project)
+                val resolvedClasses = phpIndex.getAnyByFQN(className)
+                
+                var matched = false
+                for (resolved in resolvedClasses) {
+                    if (resolved is PhpClass) {
+                        ProjectLogHelper.log(
+                            methodReference.project,
+                            "filterRelatedUsages: 检查静态调用 resolved=${resolved.fqn}, target=${phpClass.fqn}"
+                        )
+                        if (isClassRelated(resolved, phpClass)) {
+                            ProjectLogHelper.log(
+                                methodReference.project,
+                                "filterRelatedUsages: 匹配静态调用 class=${resolved.fqn}"
+                            )
+                            matched = true
+                            return resolved
+                        }
+                    }
+                }
+
+                if (!matched) {
+                    ProjectLogHelper.log(
+                        methodReference.project,
+                        "filterRelatedUsages: 静态调用类型不匹配，classReference=$className, target=${phpClass.fqn}"
+                    )
+                }
+                
+                // 静态调用已经检查完毕，无需再走对象分支
+                return null
+            } else {
+                // classReference 是变量（例如 $model），按对象调用处理
+                ProjectLogHelper.log(
+                    methodReference.project,
+                    "filterRelatedUsages: classReference 为变量，按对象调用处理 classReference=$className"
+                )
+            }
+        }
+
+        run {
+            // 对象调用：如 $obj->method()
+            val firstPsiChild = methodReference.firstPsiChild
+            
+            ProjectLogHelper.log(
+                methodReference.project,
+                "filterRelatedUsages: 检查对象调用 text=${methodReference.text}, firstChild=${firstPsiChild?.text}"
+            )
+            
+            // 获取调用对象的类型
+            if (firstPsiChild is com.jetbrains.php.lang.psi.elements.PhpTypedElement) {
+                val phpType = firstPsiChild.type
+                val globalType = phpType.global(methodReference.project)
+                
+                ProjectLogHelper.log(
+                    methodReference.project,
+                    "filterRelatedUsages: 对象类型 type=${globalType}"
+                )
+                
+                // 遍历所有类型
+                var matched = false
+                for (type in globalType.types) {
+                    val typeString = type.toString()
+                    ProjectLogHelper.log(
+                        methodReference.project,
+                        "filterRelatedUsages: 检查类型 typeString=$typeString"
+                    )
+                    
+                    // 清理类型字符串，移除前缀 \ 和 #
+                    val cleanFqn = typeString.removePrefix("\\").removePrefix("#")
+                    
+                    // 通过 PhpIndex 查找类
+                    val phpIndex = com.jetbrains.php.PhpIndex.getInstance(methodReference.project)
+                    val resolvedClasses = phpIndex.getClassesByFQN(cleanFqn)
+                    
+                    for (resolvedClass in resolvedClasses) {
+                        ProjectLogHelper.log(
+                            methodReference.project,
+                            "filterRelatedUsages: 检查解析类 resolved=${resolvedClass.fqn}, target=${phpClass.fqn}"
+                        )
+                        if (isClassRelated(resolvedClass, phpClass)) {
+                            ProjectLogHelper.log(
+                                methodReference.project,
+                                "filterRelatedUsages: 匹配对象调用 class=${resolvedClass.fqn}, variable=${firstPsiChild.text}"
+                            )
+                            matched = true
+                            return resolvedClass
+                        }
+                    }
+                }
+
+                if (!matched) {
+                    ProjectLogHelper.log(
+                        methodReference.project,
+                        "filterRelatedUsages: 对象调用类型不匹配，variable=${firstPsiChild.text}, target=${phpClass.fqn}, types=${globalType.types}"
+                    )
+                }
+            } else {
+                ProjectLogHelper.log(
+                    methodReference.project,
+                    "filterRelatedUsages: 对象调用类型不匹配，原因=firstPsiChild 非 PhpTypedElement, firstChild=${firstPsiChild?.javaClass?.name}, text=${firstPsiChild?.text}"
+                )
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * 检查调用方的类是否与当前类相关
+     *
+     * 规则：
+     * - 相同类：class1 == class2
+     * - 当前类的子类：class1 是 class2 的子类
+     *
+     * 注意：
+     * - 这里只认为“目标类本身及其子类”为相关，父类不会被视为相关
+     */
+    private fun isClassRelated(class1: PhpClass, class2: PhpClass): Boolean {
+        if (class1 == class2) {
+            return true
+        }
+
+        // 检查 class1 是否是 class2 的子类（调用方是当前类的子类时也认为相关）
+        if (isSubclassOf(class1, class2)) {
+            return true
+        }
+
+        return false
+    }
+    
+    /**
+     * 检查 child 是否是 parent 的子类
+     */
+    private fun isSubclassOf(child: PhpClass, parent: PhpClass): Boolean {
+        val visited = mutableSetOf<String>()
+        return checkInheritance(child, parent, visited)
+    }
+    
+    /**
+     * 递归检查继承关系
+     */
+    private fun checkInheritance(child: PhpClass, parent: PhpClass, visited: MutableSet<String>): Boolean {
+        val childFqn = child.fqn ?: return false
+        if (visited.contains(childFqn)) {
+            return false // 避免循环引用
+        }
+        visited.add(childFqn)
+        
+        val superClasses = child.supers
+        for (superClass in superClasses) {
+            if (superClass is PhpClass) {
+                if (superClass == parent) {
+                    return true
+                }
+                if (checkInheritance(superClass, parent, visited)) {
+                    return true
+                }
+            }
+        }
+        
+        return false
     }
         
     /**
