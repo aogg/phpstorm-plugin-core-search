@@ -4,6 +4,8 @@ import com.aogg.core.search.helper.CoreAnnotationHelper
 import com.aogg.core.search.helper.ProjectLogHelper
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationType
@@ -34,6 +36,13 @@ class CoreKeywordSearchAction(
         
         // 获取当前类中所有带有该关键词的方法
         val targetMethods = getMethodsWithKeyword(phpClass, keyword)
+            .toMutableSet()
+
+        // 仅当当前类/父类未找到时，再全项目补充，避免每次全量扫描
+        if (targetMethods.isEmpty()) {
+            val projectMethods = CoreAnnotationHelper.findMethodsByKeyword(project, keyword)
+            targetMethods.addAll(projectMethods)
+        }
         if (targetMethods.isNotEmpty()) {
             val methodInfos = targetMethods.map { method ->
                 val classFqn = (method.containingClass as? PhpClass)?.fqn ?: "<no-class>"

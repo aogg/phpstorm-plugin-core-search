@@ -3,6 +3,9 @@ package com.aogg.core.search.helper
 import com.jetbrains.php.lang.documentation.phpdoc.psi.PhpDocComment
 import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.stubs.StubIndex
+import com.jetbrains.php.lang.psi.stubs.indexes.PhpClassIndex
 import java.util.regex.Pattern
 
 /**
@@ -153,6 +156,45 @@ object CoreAnnotationHelper {
     fun getAllUniqueKeywords(phpClass: PhpClass): Set<String> {
         val coreMethods = getAllCoreMethods(phpClass)
         return coreMethods.keys
+    }
+
+    /**
+     * 在全项目范围内查找带指定 @core 关键词的方法
+     */
+    fun findMethodsByKeyword(project: com.intellij.openapi.project.Project, keyword: String): List<Method> {
+        if (keyword.isBlank()) {
+            return emptyList()
+        }
+        val result = mutableListOf<Method>()
+        val scope = GlobalSearchScope.projectScope(project)
+        val max = 300
+        StubIndex.getInstance().processAllKeys(PhpClassIndex.KEY, project) { name ->
+            if (result.size >= max) return@processAllKeys false
+            val classes = StubIndex.getElements(
+                PhpClassIndex.KEY,
+                name,
+                project,
+                scope,
+                PhpClass::class.java
+            )
+            for (phpClass in classes) {
+                if (result.size >= max) break
+                for (method in phpClass.methods) {
+                    if (!method.access.isPublic) continue
+                    val keywords = extractCoreKeywords(method)
+                    if (keywords.contains(keyword)) {
+                        result.add(method)
+                        if (result.size >= max) break
+                    }
+                }
+            }
+            true
+        }
+        if (result.isNotEmpty()) {
+            val info = result.map { ((it.containingClass as? PhpClass)?.fqn ?: "<no-class>") + "::" + it.name }
+            ProjectLogHelper.log(project, "findMethodsByKeyword: keyword=$keyword, count=${result.size}, methods=${info.joinToString("; ")}")
+        }
+        return result
     }
     
     /**
