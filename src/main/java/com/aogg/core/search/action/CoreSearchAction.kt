@@ -8,6 +8,8 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiManager
 import com.intellij.psi.util.PsiTreeUtil
 import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.intellij.openapi.actionSystem.Separator
+import com.aogg.core.search.action.AutoDiscoverActionGroup
 
 /**
  * 固定显示的核心搜索入口
@@ -20,25 +22,32 @@ class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索�
 
         val phpClass = resolvePhpClass(e.dataContext) ?: run {
             ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: phpClass null")
-            return arrayOf(CoreSearchInfoAction("未找到 PHP 类"))
+            // 没有解析到类时仍然显示占位信息并追加固定的自动发现入口
+            return arrayOf(CoreSearchInfoAction("未找到 PHP 类"), Separator.getInstance(), AutoDiscoverActionGroup())
         }
 
         if (!CoreAnnotationHelper.hasCoreAnnotation(phpClass)) {
             ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: no core annotations for class=${phpClass.fqn}")
-            return arrayOf(CoreSearchInfoAction("未找到 @core 注解"))
+            // 无 @core 注解时仍保留自动发现入口用于按方法名规则查找
+            return arrayOf(CoreSearchInfoAction("未找到 @core 注解"), Separator.getInstance(), AutoDiscoverActionGroup())
         }
 
         val keywords = CoreAnnotationHelper.getAllUniqueKeywords(phpClass).sorted()
         if (keywords.isEmpty()) {
             ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: keywords empty for class=${phpClass.fqn}")
-            return arrayOf(CoreSearchInfoAction("未找到 @core 关键词"))
+            // 关键词为空时仍显示自动发现入口
+            return arrayOf(CoreSearchInfoAction("未找到 @core 关键词"), Separator.getInstance(), AutoDiscoverActionGroup())
         }
 
-        val actions = keywords.map { keyword ->
-            CoreKeywordSearchAction(keyword, phpClass) as AnAction
-        }.toTypedArray()
-        ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: class=${phpClass.fqn}, keywords=$keywords, actions=${actions.size}")
-        return actions
+        val list = mutableListOf<AnAction>()
+        for (keyword in keywords) {
+            list.add(CoreKeywordSearchAction(keyword, phpClass))
+        }
+        // 分隔线后追加固定的自动发现二级菜单（在关键词之后）
+        list.add(Separator.getInstance())
+        list.add(AutoDiscoverActionGroup())
+        ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: class=${phpClass.fqn}, keywords=$keywords, actions=${list.size}")
+        return list.toTypedArray()
     }
 
     override fun update(e: AnActionEvent) {

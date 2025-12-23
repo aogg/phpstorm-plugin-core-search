@@ -1,0 +1,54 @@
+---
+alwaysApply: true
+---
+
+
+# PhpStorm  Plugin - Cursor Rules
+
+## 项目概述
+这是一个 IntelliJ Platform 插件项目，用于在 PhpStorm 。
+
+# 注意事项
+- 找代码不要找$env:USERPROFILE和%USERPROFILE%里的东西
+- 当前编辑器是windows环境
+- 要访问中国里国外网络要注意配置代理http://localhost_alpine:8899
+- 要访问github.com要注意配置代理https://ghproxy.com/https://github.com/
+
+# 对话中计划
+- 每次修改记得自动重新构建插件包，不用问我要不要构建
+- 每次修改任何代码都要重新构建，每次构建插件包记得更新插件包的版本号，小修改重复修改都要修改版本号
+- 作者官网: https://github.com/aogg
+- 不要用cmd /c执行命令
+- 每次打包后记得核对打包文件是否存在
+
+## 技术栈
+- **目标IDE**: PhpStorm 2023.3+
+
+## 代码规范
+1、帮助类、工具类要放到helper包下，文件名要加Helper后缀
+
+
+### 文件组织
+- 每个功能模块保持单一职责
+
+
+### 性能优化
+- 方法检测逻辑应高效，避免在大量文件中造成性能问题
+- 使用缓存机制存储编译后的正则表达式（如需要）
+
+## 构建和部署
+- 使用 `./gradlew.bat buildPlugin` 构建插件包，在项目目录
+- 插件包位于 `build/distributions/` 目录
+- 版本号在 `build.gradle.kts` 中定义
+
+## 响应语言
+- 所有回复和注释使用简体中文
+- 代码注释使用中文
+- 用户界面文本使用中文
+- 所有日志必须中文
+
+## 代码审查要点
+- 检查是否有未使用的参数或变量
+- 确保所有配置项都有合理的默认值
+- 验证通配符匹配逻辑的正确性
+- 确保高亮效果明显可见

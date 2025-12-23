@@ -23,6 +23,8 @@ import com.intellij.usages.UsageViewManager
 import com.intellij.usages.UsageViewPresentation
 import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.aogg.core.search.helper.AutoDiscoverHelper
+import com.aogg.core.search.settings.AutoDiscoverSettings
 
 /**
  * 关键词搜索动作

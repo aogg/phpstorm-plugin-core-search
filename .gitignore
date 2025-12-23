@@ -4,6 +4,7 @@ build/
 out/
 *.iml
 .idea/
+.history
 
 # IntelliJ IDEA
 *.iws
