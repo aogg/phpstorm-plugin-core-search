@@ -6,6 +6,7 @@ import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DataContext
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
@@ -19,6 +20,7 @@ import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.actionSystem.ActionManager
+import com.aogg.core.search.helper.ProjectLogHelper
 
 /**
  * 固定显示的自动发现入口（作为二级菜单）
@@ -26,13 +28,22 @@ import com.intellij.openapi.actionSystem.ActionManager
  */
 class AutoDiscoverActionGroup : ActionGroup("自动发现", "自动发现方法名规则", null), DumbAware {
 
+    // 指定在后台线程更新，以避免在 EDT 上做耗时操作导致 UI 卡顿/警告
+    override fun getActionUpdateThread(): ActionUpdateThread {
+        return ActionUpdateThread.BGT
+    }
+
     override fun getChildren(e: AnActionEvent?): Array<AnAction> {
         if (e == null) return emptyArray()
 
         val phpClass = resolvePhpClass(e.dataContext) ?: return arrayOf(InfoAction("未找到 PHP 类"))
 
-        // 尝试从缓存中获取匹配规则
-        val matched = AutoDiscoverHelper.collectMatchingRulesForClass(phpClass)
+        // 尝试从缓存中获取匹配规则（在 read-action 中执行 PSI 读取以保证线程安全）
+        var matched: List<String> = emptyList()
+        ApplicationManager.getApplication().runReadAction {
+            matched = AutoDiscoverHelper.collectMatchingRulesForClass(phpClass)
+        }
+        ProjectLogHelper.log(phpClass.project, "自动发现: getChildren: class=${phpClass.fqn}, matched=${matched}")
         if (matched.isNotEmpty()) {
             val actions = matched.map { pattern ->
                 AutoDiscoverPatternSearchAction(pattern, phpClass) as AnAction
@@ -43,6 +54,7 @@ class AutoDiscoverActionGroup : ActionGroup("自动发现", "自动发现方法�
         // 缓存为空：返回占位并在后台加载（下一次打开菜单会展示结果）
         // 后台任务仅负责刷新缓存
         val project = e.project
+        ProjectLogHelper.log(project, "自动发现: 缓存未命中，提交后台收集 class=${phpClass.fqn}")
         submitBackgroundCollect(phpClass, project)
 
         return arrayOf(InfoAction("正在加载自动发现..."))
@@ -58,10 +70,18 @@ class AutoDiscoverActionGroup : ActionGroup("自动发现", "自动发现方法�
     private fun submitBackgroundCollect(phpClass: PhpClass, project: Project?) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "自动发现：收集规则", false) {
             override fun run(indicator: ProgressIndicator) {
-                // 在 read action 中读取 PSI
+                // 在 read action 中读取 PSI，并提取必要的不可变信息以便在后台线程安全使用
+                var classFqn: String? = null
                 ApplicationManager.getApplication().runReadAction {
                     AutoDiscoverHelper.collectMatchingRulesForClass(phpClass)
+                    // 在 read action 内访问 PSI 数据
+                    try {
+                        classFqn = phpClass.fqn
+                    } catch (_: Throwable) {
+                        classFqn = null
+                    }
                 }
+
                 // 尝试触发 UI 刷新：更新 CoreSearchAction 所在分组的 presentation
                 try {
                     val mgr = ActionManager.getInstance()
@@ -72,6 +92,7 @@ class AutoDiscoverActionGroup : ActionGroup("自动发现", "自动发现方法�
                 } catch (ignored: Exception) {
                     // 不影响主要逻辑
                 }
+                ProjectLogHelper.log(project, "自动发现: 后台收集完成 class=${classFqn ?: "<unknown>"}")
             }
         })
     }

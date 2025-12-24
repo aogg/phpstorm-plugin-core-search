@@ -83,7 +83,9 @@ class AutoDiscoverConfigurable : Configurable, DumbAware {
         val list = text.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
         settings.rules = list
         settings.caseInsensitive = caseCheck?.isSelected ?: true
-        // 设置变化后，缓存由 Helper 在下一次请求时失效/刷新
+        // 设置变化后，清理缓存并记录日志
+        com.aogg.core.search.helper.ProjectLogHelper.log(null, "自动发现: 设置已更新 rules=${settings.rules} caseInsensitive=${settings.caseInsensitive}")
+        com.aogg.core.search.helper.AutoDiscoverHelper.clearCache()
     }
 
     override fun reset() {
