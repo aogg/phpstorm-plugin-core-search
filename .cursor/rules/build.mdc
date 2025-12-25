@@ -1,6 +1,6 @@
 ---
 description: 需要打包的时候
-alwaysApply: false
+alwaysApply: true
 ---
 # 每次构建和对话
 - 每次修改记得自动重新构建插件包，不用问我要不要构建
