@@ -30,6 +30,8 @@ import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiManager
 import com.intellij.openapi.project.DumbAware
+import com.intellij.openapi.wm.ToolWindowAnchor
+import com.intellij.openapi.wm.RegisterToolWindowTask
 import java.io.File
 
 /**
@@ -158,33 +160,133 @@ class AutoDiscoverPatternSearchAction(
     }
 
     private fun showUsages(project: Project, usages: List<Usage>, title: String) {
-        // 直接使用弹窗显示结果
-        ProjectLogHelper.log(project, "自动发现: 直接调用 showCustomUsagesPopup 显示结果 title=$title usages=${usages.size}")
+        // 直接使用工具窗口显示结果（类似终端窗口）
+        ProjectLogHelper.log(project, "自动发现: 直接调用工具窗口显示结果 title=$title usages=${usages.size}")
         try {
-            showCustomUsagesPopup(project, usages, title)
+            showAutoDiscoverToolWindow(project, usages, title)
         } catch (ex: Throwable) {
-            ProjectLogHelper.log(project, "自动发现: 弹窗显示失败，回退到标准用法视图 title=$title ex=${ex.message}\n${ex.stackTraceToString()}")
-
-            // 最后的回退方案：使用标准的 UsageView
-            val usageTargets = emptyArray<UsageTarget>()
-            val presentation = UsageViewPresentation()
-            presentation.tabName = "$title-自动发现-核心搜索"
-            presentation.tabText = "$title-自动发现-核心搜索"
-            presentation.scopeText = "项目范围"
-
+            ProjectLogHelper.log(project, "自动发现: 工具窗口显示失败，回退到弹窗 title=$title ex=${ex.message}\n${ex.stackTraceToString()}")
             try {
-                val hidden = com.aogg.core.search.helper.AutoDiscoverUiHelper.tryHidePresentationOptions(presentation)
-                ProjectLogHelper.log(project, "自动发现: 尝试隐藏 UsageViewPresentation 选项 hidden=${hidden}")
-            } catch (exUi: Throwable) {
-                ProjectLogHelper.log(project, "自动发现: 隐藏 UsageViewPresentation 选项失败 ex=${exUi.message}")
-            }
+                showCustomUsagesPopup(project, usages, title)
+            } catch (exPopup: Throwable) {
+                ProjectLogHelper.log(project, "自动发现: 弹窗显示失败，回退到标准用法视图 title=$title ex=${exPopup.message}\n${exPopup.stackTraceToString()}")
 
-            UsageViewManager.getInstance(project).showUsages(
-                usageTargets,
-                usages.toTypedArray(),
-                presentation
+                // 最后的回退方案：使用标准的 UsageView
+                val usageTargets = emptyArray<UsageTarget>()
+                val presentation = UsageViewPresentation()
+                presentation.tabName = "$title-自动发现-核心搜索"
+                presentation.tabText = "$title-自动发现-核心搜索"
+                presentation.scopeText = "项目范围"
+
+                try {
+                    val hidden = com.aogg.core.search.helper.AutoDiscoverUiHelper.tryHidePresentationOptions(presentation)
+                    ProjectLogHelper.log(project, "自动发现: 尝试隐藏 UsageViewPresentation 选项 hidden=${hidden}")
+                } catch (exUi: Throwable) {
+                    ProjectLogHelper.log(project, "自动发现: 隐藏 UsageViewPresentation 选项失败 ex=${exUi.message}")
+                }
+
+                UsageViewManager.getInstance(project).showUsages(
+                    usageTargets,
+                    usages.toTypedArray(),
+                    presentation
+                )
+            }
+        }
+    }
+
+    private fun showAutoDiscoverToolWindow(project: Project, usages: List<Usage>, title: String) {
+        val toolWindowManager = com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
+        val toolWindowId = "Auto Discover Results"
+
+        // 获取或创建工具窗口
+        var toolWindow = toolWindowManager.getToolWindow(toolWindowId)
+        if (toolWindow == null) {
+            // 如果工具窗口不存在，创建临时工具窗口
+            toolWindow = toolWindowManager.registerToolWindow(
+                RegisterToolWindowTask(
+                    toolWindowId,
+                    ToolWindowAnchor.TOP,
+                    null,
+                    true
+                )
             )
         }
+
+        // 准备数据
+        val model = javax.swing.DefaultListModel<String>()
+        val items = mutableListOf<DisplayItem>()
+        val psiDocManager = com.intellij.psi.PsiDocumentManager.getInstance(project)
+
+        for (usage in usages) {
+            val info = (usage as? UsageInfo2UsageAdapter)?.usageInfo ?: continue
+            val element = info.element ?: continue
+            val virtualFile = element.containingFile?.virtualFile ?: continue
+            val doc = psiDocManager.getDocument(element.containingFile) ?: continue
+            val elemOffset = element.textOffset
+            val line = doc.getLineNumber(elemOffset)
+            val lineStart = doc.getLineStartOffset(line)
+            val lineEnd = doc.getLineEndOffset(line)
+            val preview = try {
+                val raw = doc.getText(com.intellij.openapi.util.TextRange(lineStart, lineEnd)).trim()
+                if (raw.length > 120) raw.substring(0, 120) + "..." else raw
+            } catch (_: Throwable) {
+                ""
+            }
+            val methodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
+            val display = "${methodName} — ${virtualFile.path}:${line + 1} — ${preview}"
+            model.addElement(display)
+            items.add(DisplayItem(methodName, virtualFile.path, line, preview, elemOffset))
+        }
+
+        // 创建内容面板
+        val list = com.intellij.ui.components.JBList(model)
+        list.selectionMode = javax.swing.ListSelectionModel.SINGLE_SELECTION
+        list.visibleRowCount = 10
+
+        list.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                if (e.clickCount == 2) {
+                    val idx = list.selectedIndex
+                    if (idx >= 0 && idx < items.size) {
+                        val it = items[idx]
+                        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(it.filePath)
+                        if (vf != null) {
+                            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, it.line, 0).navigate(true)
+                        }
+                    }
+                }
+            }
+        })
+
+        // 创建工具栏面板，包含标题和隐藏按钮
+        val toolbar = javax.swing.JPanel(java.awt.BorderLayout())
+
+        // 标题标签
+        val titleLabel = javax.swing.JLabel("$title-自动发现-核心搜索")
+        titleLabel.font = titleLabel.font.deriveFont(java.awt.Font.BOLD)
+        toolbar.add(titleLabel, java.awt.BorderLayout.WEST)
+
+        // 隐藏按钮
+        val hideButton = javax.swing.JButton("隐藏")
+        hideButton.addActionListener {
+            toolWindow?.hide(null)
+        }
+        toolbar.add(hideButton, java.awt.BorderLayout.EAST)
+
+        // 主面板
+        val mainPanel = javax.swing.JPanel(java.awt.BorderLayout())
+        mainPanel.add(toolbar, java.awt.BorderLayout.NORTH)
+        mainPanel.add(javax.swing.JScrollPane(list), java.awt.BorderLayout.CENTER)
+
+        // 设置工具窗口内容
+        val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
+        val content = contentFactory.createContent(mainPanel, title, false)
+        toolWindow.contentManager.removeAllContents(false)
+        toolWindow.contentManager.addContent(content)
+
+        // 显示工具窗口
+        toolWindow.show(null)
+        ProjectLogHelper.log(project, "自动发现: 工具窗口已显示 title=$title items=${model.size}")
     }
 
     private data class DisplayItem(val title: String, val filePath: String, val line: Int, val preview: String, val elementOffset: Int)
