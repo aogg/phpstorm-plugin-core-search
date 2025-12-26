@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
-# 以字节方式读取 stdin 并用 UTF-8 解码，避免控制台编码导致的中文乱码
+"""
+HISH Cursor Hook: Build Plugin
+"""
 
-import sys
 import json
+import sys
 
-data_bytes = sys.stdin.buffer.read()
-try:
-    stdin_text = data_bytes.decode('utf-8')
-except Exception:
-    # 回退尝试常见编码
+
+def main():
+    """Process Cursor prompt event and inject build instructions."""
     try:
-        stdin_text = data_bytes.decode('gbk', errors='ignore')
+        # Read event from stdin
+        event = json.load(sys.stdin)
+
+        # Get original prompt
+        orig = event.get("prompt", "")
+
+        # Add build instruction
+        new_prompt = "每次都需要更新版本号然后打包，最后检测打包文件是否存在。 " + orig
+
+        # Update event
+        event["prompt"] = new_prompt
+
+        # Output modified event
+        json.dump(event, sys.stdout)
+
     except Exception:
-        stdin_text = data_bytes.decode('utf-8', errors='ignore')
+        # On error, pass through original event unchanged
+        try:
+            if 'event' in locals():
+                json.dump(event, sys.stdout)
+            else:
+                json.dump({}, sys.stdout)
+        except Exception:
+            json.dump({}, sys.stdout)
 
-try:
-    data = json.loads(stdin_text)
-except Exception:
-    data = {}
 
-orig = data.get('prompt', '')
-
-new_prompt = "每次都需要跟新版本号然后打包最后检测打包文件是否存在 " + orig
-
-result = {"continue": True, "prompt": new_prompt}
-
-# 确保以 UTF-8 写出
-out = json.dumps(result, ensure_ascii=False, separators=(',', ':'))
-sys.stdout.buffer.write(out.encode('utf-8'))
+if __name__ == "__main__":
+    main()
