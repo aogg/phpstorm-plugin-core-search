@@ -25,6 +25,7 @@ import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.aogg.core.search.helper.ProjectLogHelper
 import com.aogg.core.search.helper.AutoDiscoverDisplayHelper
+import com.aogg.core.search.helper.AutoDiscoverUiHelper
 import com.intellij.openapi.actionSystem.Presentation
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.psi.PsiDocumentManager
@@ -33,6 +34,24 @@ import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.wm.ToolWindowAnchor
 import com.intellij.openapi.wm.RegisterToolWindowTask
 import java.io.File
+import javax.swing.JSplitPane
+import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.components.JBTextArea
+import java.awt.BorderLayout
+import javax.swing.JPanel
+import javax.swing.event.ListSelectionListener
+import javax.swing.event.ListSelectionEvent
+import javax.swing.JTree
+import javax.swing.tree.DefaultMutableTreeNode
+import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreeSelectionModel
+import javax.swing.event.TreeSelectionListener
+import javax.swing.event.TreeSelectionEvent
+import javax.swing.JCheckBox
+import javax.swing.Box
+import javax.swing.BoxLayout
+import java.awt.event.ItemListener
+import java.awt.event.ItemEvent
 
 /**
  * 点击三级项后执行的搜索动作：按方法名模式收集方法并查找 usages
@@ -129,8 +148,8 @@ class AutoDiscoverPatternSearchAction(
             return
         }
 
-        // 搜索所有 usages 并展示（复用 CoreKeywordSearchAction 风格）
-        val usageInfos = mutableListOf<com.intellij.usageView.UsageInfo>()
+        // 搜索所有 usages 并记录每条 usage 对应的目标方法名（target method）
+        val usageWithTargets = mutableListOf<UsageWithTarget>()
         val methodsList = targetMethods.toList()
         for (method in methodsList) {
             indicator.checkCanceled()
@@ -138,20 +157,47 @@ class AutoDiscoverPatternSearchAction(
             for (ref in refs) {
                 val element = ref.element
                 val range = ref.rangeInElement
-                usageInfos.add(UsageInfo(element, range.startOffset, range.endOffset, true))
+                usageWithTargets.add(UsageWithTarget(UsageInfo(element, range.startOffset, range.endOffset, true), method.name ?: "<unknown-target>"))
             }
         }
-        ProjectLogHelper.log(project, "自动发现: raw usageInfos count=${usageInfos.size} for pattern=$pattern class=${targetClass.fqn}")
+        ProjectLogHelper.log(project, "自动发现: raw usageWithTargets count=${usageWithTargets.size} for pattern=$pattern class=${targetClass.fqn}")
 
         // 二次过滤：只保留调用方为当前类或其子类的调用（同时在日志中记录被过滤的原因）
-        val filteredUsageInfos = filterRelatedUsages(usageInfos, targetClass)
-        ProjectLogHelper.log(project, "自动发现: filtered usageInfos count=${filteredUsageInfos.size} (raw=${usageInfos.size}) pattern=$pattern class=${targetClass.fqn}")
-        val usages = filteredUsageInfos.map { UsageInfo2UsageAdapter(it) }.toMutableList()
+        val filteredUsageWithTargets = filterRelatedUsages(usageWithTargets, targetClass)
+        ProjectLogHelper.log(project, "自动发现: filtered usageWithTargets count=${filteredUsageWithTargets.size} (raw=${usageWithTargets.size}) pattern=$pattern class=${targetClass.fqn}")
 
         ApplicationManager.getApplication().invokeLater {
-            if (usages.isNotEmpty()) {
-                ProjectLogHelper.log(project, "自动发现: performSearch 找到 usages=${usages.size} pattern=$pattern")
-                showUsages(project, usages, pattern)
+            if (filteredUsageWithTargets.isNotEmpty()) {
+                ProjectLogHelper.log(project, "自动发现: performSearch 找到 usages=${filteredUsageWithTargets.size} pattern=$pattern")
+                try {
+                    showAutoDiscoverToolWindow(project, filteredUsageWithTargets, pattern)
+                } catch (ex: Throwable) {
+                    ProjectLogHelper.log(project, "自动发现: 工具窗口显示失败，回退到弹窗 title=$pattern ex=${ex.message}\n${ex.stackTraceToString()}")
+                    try {
+                        val fallbackUsages = filteredUsageWithTargets.map { UsageInfo2UsageAdapter(it.usageInfo) as Usage }
+                        showCustomUsagesPopup(project, fallbackUsages, pattern)
+                    } catch (exPopup: Throwable) {
+                        ProjectLogHelper.log(project, "自动发现: 弹窗显示失败，回退到标准用法视图 title=$pattern ex=${exPopup.message}\n${exPopup.stackTraceToString()}")
+                        // 最后回退到 UsageView（使用原始 UsageInfo 列表）
+                        val usageTargets = emptyArray<UsageTarget>()
+                        val presentation = UsageViewPresentation()
+                        presentation.tabName = "$pattern-自动发现-核心搜索"
+                        presentation.tabText = "$pattern-自动发现-核心搜索"
+                        presentation.scopeText = "项目范围"
+                        try {
+                            val hidden = com.aogg.core.search.helper.AutoDiscoverUiHelper.tryHidePresentationOptions(presentation)
+                            ProjectLogHelper.log(project, "自动发现: 尝试隐藏 UsageViewPresentation 选项 hidden=${hidden}")
+                        } catch (exUi: Throwable) {
+                            ProjectLogHelper.log(project, "自动发现: 隐藏 UsageViewPresentation 选项失败 ex=${exUi.message}")
+                        }
+                        val usageInfosForView = filteredUsageWithTargets.map { it.usageInfo }
+                        UsageViewManager.getInstance(project).showUsages(
+                            usageTargets,
+                            usageInfosForView.map { UsageInfo2UsageAdapter(it) }.toTypedArray(),
+                            presentation
+                        )
+                    }
+                }
             } else {
                 ProjectLogHelper.log(project, "自动发现: performSearch 未找到 usages pattern=$pattern")
                 notifyInfo(project, "未找到调用匹配 $pattern 的方法的位置")
@@ -163,7 +209,24 @@ class AutoDiscoverPatternSearchAction(
         // 直接使用工具窗口显示结果（类似终端窗口）
         ProjectLogHelper.log(project, "自动发现: 直接调用工具窗口显示结果 title=$title usages=${usages.size}")
         try {
-            showAutoDiscoverToolWindow(project, usages, title)
+            // 将普通 Usage 列表转换为 UsageWithTarget 列表（尝试解析目标方法名）
+            val uwtList = mutableListOf<UsageWithTarget>()
+            for (u in usages) {
+                val info = (u as? UsageInfo2UsageAdapter)?.usageInfo ?: continue
+                val element = info.element ?: continue
+                val methodRef = PsiTreeUtil.getParentOfType(
+                    element,
+                    com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                    /* strict = */ false
+                )
+                val targetName = try {
+                    (methodRef?.resolve() as? Method)?.name ?: "<unknown-target>"
+                } catch (_: Throwable) {
+                    "<unknown-target>"
+                }
+                uwtList.add(UsageWithTarget(info, targetName))
+            }
+            showAutoDiscoverToolWindow(project, uwtList, title)
         } catch (ex: Throwable) {
             ProjectLogHelper.log(project, "自动发现: 工具窗口显示失败，回退到弹窗 title=$title ex=${ex.message}\n${ex.stackTraceToString()}")
             try {
@@ -194,7 +257,8 @@ class AutoDiscoverPatternSearchAction(
         }
     }
 
-    private fun showAutoDiscoverToolWindow(project: Project, usages: List<Usage>, title: String) {
+    // 新的工具窗口接收带 targetMethod 信息的 UsageWithTarget 列表
+    private fun showAutoDiscoverToolWindow(project: Project, usagesWithTarget: List<UsageWithTarget>, title: String) {
         val toolWindowManager = com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
         val toolWindowId = "Auto Discover Results"
 
@@ -213,12 +277,12 @@ class AutoDiscoverPatternSearchAction(
         }
 
         // 准备数据
-        val model = javax.swing.DefaultListModel<String>()
         val items = mutableListOf<DisplayItem>()
         val psiDocManager = com.intellij.psi.PsiDocumentManager.getInstance(project)
 
-        for (usage in usages) {
-            val info = (usage as? UsageInfo2UsageAdapter)?.usageInfo ?: continue
+        for (uwt in usagesWithTarget) {
+            val info = uwt.usageInfo
+            val targetName = uwt.targetMethodName
             val element = info.element ?: continue
             val virtualFile = element.containingFile?.virtualFile ?: continue
             val doc = psiDocManager.getDocument(element.containingFile) ?: continue
@@ -232,51 +296,135 @@ class AutoDiscoverPatternSearchAction(
             } catch (_: Throwable) {
                 ""
             }
-            val methodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
-            val display = "${methodName} — ${virtualFile.path}:${line + 1} — ${preview}"
-            model.addElement(display)
-            items.add(DisplayItem(methodName, virtualFile.path, line, preview, elemOffset))
+            val callerMethodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
+            val previewText = AutoDiscoverUiHelper.getMethodPreviewFromElement(element, 3)
+            items.add(
+                DisplayItem(
+                    title = callerMethodName,
+                    filePath = virtualFile.path,
+                    line = line,
+                    preview = preview,
+                    elementOffset = elemOffset,
+                    methodName = targetName,
+                    previewText = previewText,
+                    targetMethodName = targetName,
+                    callerMethodName = callerMethodName
+                )
+            )
         }
 
-        // 创建内容面板
-        val list = com.intellij.ui.components.JBList(model)
-        list.selectionMode = javax.swing.ListSelectionModel.SINGLE_SELECTION
-        list.visibleRowCount = 10
+        // 按方法名分组并创建树形结构（与弹窗一致的视图）
+        val groupedItems = items.groupBy { it.methodName }
 
-        list.addMouseListener(object : java.awt.event.MouseAdapter() {
+        val rootNode = DefaultMutableTreeNode("搜索结果")
+        for ((methodName, methodItems) in groupedItems) {
+            val groupNode = DefaultMutableTreeNode("$methodName (${methodItems.size})")
+            for (item in methodItems) {
+                val relPath = try {
+                    val base = project.basePath
+                    if (base != null) {
+                        java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                            .replace(java.io.File.separatorChar, '/')
+                    } else {
+                        item.filePath
+                    }
+                } catch (_: Throwable) {
+                    item.filePath
+                }
+                val label = "${relPath} — ${item.callerMethodName}"
+                val leafNode = DefaultMutableTreeNode(label)
+                leafNode.userObject = item
+                groupNode.add(leafNode)
+            }
+            rootNode.add(groupNode)
+        }
+
+        val treeModel = DefaultTreeModel(rootNode)
+        val tree = JTree(treeModel)
+        tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+
+        // 预览区域
+        val previewTextArea = JBTextArea()
+        previewTextArea.isEditable = false
+        previewTextArea.lineWrap = true
+        previewTextArea.wrapStyleWord = true
+        previewTextArea.rows = 15
+        val previewScrollPane = JBScrollPane(previewTextArea)
+
+        // 分割面板（左右分屏）
+        val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
+        splitPane.leftComponent = JBScrollPane(tree)
+        splitPane.rightComponent = previewScrollPane
+        splitPane.resizeWeight = 0.4
+        splitPane.dividerLocation = 500
+
+        // 控制面板（显示预览开关）
+        val controlPanel = JPanel()
+        controlPanel.layout = BoxLayout(controlPanel, BoxLayout.X_AXIS)
+        val showPreviewCheckBox = JCheckBox("显示预览", true)
+        showPreviewCheckBox.addItemListener(object : ItemListener {
+            override fun itemStateChanged(e: ItemEvent) {
+                val showPreview = e.stateChange == ItemEvent.SELECTED
+                splitPane.bottomComponent = if (showPreview) previewScrollPane else null
+                splitPane.revalidate()
+                splitPane.repaint()
+            }
+        })
+        controlPanel.add(showPreviewCheckBox)
+        controlPanel.add(Box.createHorizontalGlue())
+
+        // 组合主面板（包含工具栏）
+        val toolbar = javax.swing.JPanel(java.awt.BorderLayout())
+        val titleLabel = javax.swing.JLabel("$title-自动发现-核心搜索")
+        titleLabel.font = titleLabel.font.deriveFont(java.awt.Font.BOLD)
+        toolbar.add(titleLabel, java.awt.BorderLayout.WEST)
+
+        val mainPanel = JPanel(BorderLayout())
+        mainPanel.add(toolbar, BorderLayout.NORTH)
+        mainPanel.add(controlPanel, BorderLayout.NORTH)
+        mainPanel.add(splitPane, BorderLayout.CENTER)
+
+        // 树选择监听，更新预览并高亮
+        tree.addTreeSelectionListener(object : TreeSelectionListener {
+            override fun valueChanged(e: TreeSelectionEvent) {
+                val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
+                if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
+                    val selectedItem = selectedNode.userObject as DisplayItem
+                    previewTextArea.text = if (selectedItem.previewText.isNotEmpty()) selectedItem.previewText else "无法获取方法预览"
+                    if (title.isNotEmpty()) {
+                        highlightSearchKeyword(previewTextArea, title)
+                    }
+                } else {
+                    previewTextArea.text = "选择一个具体的结果项查看预览"
+                }
+            }
+        })
+
+        // 双击打开文件
+        tree.addMouseListener(object : java.awt.event.MouseAdapter() {
             override fun mouseClicked(e: java.awt.event.MouseEvent) {
                 if (e.clickCount == 2) {
-                    val idx = list.selectedIndex
-                    if (idx >= 0 && idx < items.size) {
-                        val it = items[idx]
-                        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(it.filePath)
+                    val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
+                    if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
+                        val selectedItem = selectedNode.userObject as DisplayItem
+                        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(selectedItem.filePath)
                         if (vf != null) {
-                            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, it.line, 0).navigate(true)
+                            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, selectedItem.line, 0).navigate(true)
                         }
                     }
                 }
             }
         })
 
-        // 创建工具栏面板，包含标题和隐藏按钮
-        val toolbar = javax.swing.JPanel(java.awt.BorderLayout())
-
-        // 标题标签
-        val titleLabel = javax.swing.JLabel("$title-自动发现-核心搜索")
-        titleLabel.font = titleLabel.font.deriveFont(java.awt.Font.BOLD)
-        toolbar.add(titleLabel, java.awt.BorderLayout.WEST)
-
-        // 隐藏按钮
-        // val hideButton = javax.swing.JButton("隐藏")
-        // hideButton.addActionListener {
-            // toolWindow?.hide(null)
-        // }
-        // toolbar.add(hideButton, java.awt.BorderLayout.EAST)
-
-        // 主面板
-        val mainPanel = javax.swing.JPanel(java.awt.BorderLayout())
-        mainPanel.add(toolbar, java.awt.BorderLayout.NORTH)
-        mainPanel.add(javax.swing.JScrollPane(list), java.awt.BorderLayout.CENTER)
+        // 展开并选中第一个叶子
+        if (rootNode.childCount > 0) {
+            val firstGroupNode = rootNode.getChildAt(0) as DefaultMutableTreeNode
+            tree.expandPath(javax.swing.tree.TreePath(firstGroupNode.path))
+            if (firstGroupNode.childCount > 0) {
+                val firstLeafNode = firstGroupNode.getChildAt(0) as DefaultMutableTreeNode
+                tree.selectionPath = javax.swing.tree.TreePath(firstLeafNode.path)
+            }
+        }
 
         // 设置工具窗口内容
         val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
@@ -286,14 +434,25 @@ class AutoDiscoverPatternSearchAction(
 
         // 显示工具窗口
         toolWindow.show(null)
-        ProjectLogHelper.log(project, "自动发现: 工具窗口已显示 title=$title items=${model.size}")
+        ProjectLogHelper.log(project, "自动发现: 工具窗口已显示 title=$title items=${items.size}")
     }
 
-    private data class DisplayItem(val title: String, val filePath: String, val line: Int, val preview: String, val elementOffset: Int)
+    private data class DisplayItem(
+        val title: String,
+        val filePath: String,
+        val line: Int,
+        val preview: String,
+        val elementOffset: Int,
+        val methodName: String = "",
+        val previewText: String = "",
+        val targetMethodName: String = "",
+        val callerMethodName: String = ""
+    )
+
+    private data class UsageWithTarget(val usageInfo: UsageInfo, val targetMethodName: String)
 
     private fun showCustomUsagesPopup(project: Project, usages: List<Usage>, title: String) {
         ProjectLogHelper.log(project, "自动发现: 进入 showCustomUsagesPopup title=$title usages=${usages.size}")
-        val model = javax.swing.DefaultListModel<String>()
         val items = mutableListOf<DisplayItem>()
         val psiDocManager = com.intellij.psi.PsiDocumentManager.getInstance(project)
 
@@ -312,25 +471,145 @@ class AutoDiscoverPatternSearchAction(
             } catch (_: Throwable) {
                 ""
             }
-            val methodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
-            val display = "${methodName} — ${virtualFile.path}:${line + 1} — ${preview}"
-            model.addElement(display)
-            items.add(DisplayItem(methodName, virtualFile.path, line, preview, elemOffset))
+            val callerMethodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
+            val methodRef = PsiTreeUtil.getParentOfType(
+                element,
+                com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                /* strict = */ false
+            )
+            val targetName = try {
+                (methodRef?.resolve() as? Method)?.name ?: "<unknown-target>"
+            } catch (_: Throwable) {
+                "<unknown-target>"
+            }
+            val previewText = AutoDiscoverUiHelper.getMethodPreviewFromElement(element, 3)
+            items.add(
+                DisplayItem(
+                    title = callerMethodName,
+                    filePath = virtualFile.path,
+                    line = line,
+                    preview = preview,
+                    elementOffset = elemOffset,
+                    methodName = targetName,
+                    previewText = previewText,
+                    targetMethodName = targetName,
+                    callerMethodName = callerMethodName
+                )
+            )
         }
 
-        val list = com.intellij.ui.components.JBList(model)
-        list.selectionMode = javax.swing.ListSelectionModel.SINGLE_SELECTION
-        list.visibleRowCount = 10
+        // 按目标方法名分组（targetMethodName）
+        val groupedItems = items.groupBy { if (it.targetMethodName.isNotEmpty()) it.targetMethodName else "其他" }
 
-        list.addMouseListener(object : java.awt.event.MouseAdapter() {
+        // 创建树形结构
+        val rootNode = DefaultMutableTreeNode("搜索结果")
+        for ((targetName, methodItems) in groupedItems) {
+            val groupNode = DefaultMutableTreeNode("$targetName (${methodItems.size})")
+            for (item in methodItems) {
+                val relPath = try {
+                    val base = project.basePath
+                    if (base != null) {
+                        java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                            .replace(java.io.File.separatorChar, '/')
+                    } else {
+                        item.filePath
+                    }
+                } catch (_: Throwable) {
+                    item.filePath
+                }
+                val label = "${relPath} — ${item.callerMethodName}"
+                val leafNode = DefaultMutableTreeNode(label)
+                leafNode.userObject = item // 存储完整的DisplayItem对象
+                groupNode.add(leafNode)
+            }
+            rootNode.add(groupNode)
+        }
+
+        val treeModel = DefaultTreeModel(rootNode)
+        val tree = JTree(treeModel)
+        tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+
+        // 创建预览文本区域
+        val previewTextArea = JBTextArea()
+        previewTextArea.isEditable = false
+        previewTextArea.lineWrap = true
+        previewTextArea.wrapStyleWord = true
+        previewTextArea.rows = 15
+        previewTextArea.lineWrap = true
+        previewTextArea.wrapStyleWord = true
+        previewTextArea.rows = 15
+
+        val previewScrollPane = JBScrollPane(previewTextArea)
+
+        // 创建分割面板（左右分屏）
+        val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
+        splitPane.leftComponent = JBScrollPane(tree)
+        splitPane.rightComponent = previewScrollPane
+        splitPane.resizeWeight = 0.4  // 树占40%，预览占60%
+        splitPane.dividerLocation = 400
+
+        // 创建控制面板
+        val controlPanel = JPanel()
+        controlPanel.layout = BoxLayout(controlPanel, BoxLayout.X_AXIS)
+
+        val showPreviewCheckBox = JCheckBox("显示预览", true)
+        showPreviewCheckBox.addItemListener(object : ItemListener {
+            override fun itemStateChanged(e: ItemEvent) {
+                val showPreview = e.stateChange == ItemEvent.SELECTED
+                splitPane.bottomComponent = if (showPreview) previewScrollPane else null
+                splitPane.revalidate()
+                splitPane.repaint()
+            }
+        })
+
+        controlPanel.add(showPreviewCheckBox)
+        controlPanel.add(Box.createHorizontalGlue()) // 添加弹性空间
+
+        // 创建主面板
+        val mainPanel = JPanel(BorderLayout())
+        mainPanel.add(controlPanel, BorderLayout.NORTH)
+        mainPanel.add(splitPane, BorderLayout.CENTER)
+
+        // 树选择监听器，更新预览内容
+        tree.addTreeSelectionListener(object : TreeSelectionListener {
+            override fun valueChanged(e: TreeSelectionEvent) {
+                val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
+                if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
+                    val selectedItem = selectedNode.userObject as DisplayItem
+                    previewTextArea.text = if (selectedItem.previewText.isNotEmpty()) {
+                        selectedItem.previewText
+                    } else {
+                        "无法获取方法预览"
+                    }
+                    // 高亮搜索关键字（简单实现）
+                    if (title.isNotEmpty()) {
+                        highlightSearchKeyword(previewTextArea, title)
+                    }
+                } else {
+                    previewTextArea.text = "选择一个具体的结果项查看预览"
+                }
+            }
+        })
+
+        // 默认展开第一级节点并选择第一个叶子节点
+        if (rootNode.childCount > 0) {
+            val firstGroupNode = rootNode.getChildAt(0) as DefaultMutableTreeNode
+            tree.expandPath(javax.swing.tree.TreePath(firstGroupNode.path))
+            if (firstGroupNode.childCount > 0) {
+                val firstLeafNode = firstGroupNode.getChildAt(0) as DefaultMutableTreeNode
+                tree.selectionPath = javax.swing.tree.TreePath(firstLeafNode.path)
+            }
+        }
+
+        tree.addMouseListener(object : java.awt.event.MouseAdapter() {
             override fun mouseClicked(e: java.awt.event.MouseEvent) {
                 if (e.clickCount == 2) {
-                    val idx = list.selectedIndex
-                    if (idx >= 0 && idx < items.size) {
-                        val it = items[idx]
-                        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(it.filePath)
+                    val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
+                    if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
+                        val selectedItem = selectedNode.userObject as DisplayItem
+                        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(selectedItem.filePath)
                         if (vf != null) {
-                            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, it.line, 0).navigate(true)
+                            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, selectedItem.line, 0).navigate(true)
                         }
                     }
                 }
@@ -341,22 +620,24 @@ class AutoDiscoverPatternSearchAction(
         try {
             // 记录前几个显示项用于排查
             val previewItems = StringBuilder()
-            val previewCount = Math.min(5, model.size)
+            val previewCount = Math.min(5, items.size)
             for (i in 0 until previewCount) {
                 try {
-                    previewItems.append("[${i}]:${model.get(i)}; ")
+                    val item = items[i]
+                    previewItems.append("[${i}]:${item.methodName}@${item.filePath}:${item.line + 1}; ")
                 } catch (_: Throwable) {
                 }
             }
-            ProjectLogHelper.log(project, "自动发现: 准备显示自定义弹窗 title=$title items=${model.size} preview=$previewItems")
+            ProjectLogHelper.log(project, "自动发现: 准备显示自定义弹窗 title=$title items=${items.size} preview=$previewItems")
             val popup = popupFactory
-                .createComponentPopupBuilder(list, list)
+                .createComponentPopupBuilder(mainPanel, tree)
                 .setTitle("$title-自动发现-核心搜索")
                 .setResizable(true)
                 .setMovable(true)
+                .setMinSize(java.awt.Dimension(800, 600))
                 .createPopup()
             popup.showInFocusCenter()
-            ProjectLogHelper.log(project, "自动发现: 自定义弹窗已显示 title=$title items=${model.size}")
+            ProjectLogHelper.log(project, "自动发现: 自定义弹窗已显示 title=$title items=${items.size}")
         } catch (exPopup: Throwable) {
             ProjectLogHelper.log(project, "自动发现: 自定义弹窗显示失败 title=$title ex=${exPopup.message}\n${exPopup.stackTraceToString()}")
             throw exPopup
@@ -426,10 +707,12 @@ class AutoDiscoverPatternSearchAction(
 
     /**
      * 二次过滤：只保留和当前类相关的调用（调用方为当前类或当前类的子类，或静态调用目标类匹配）
+     * 接受 UsageWithTarget 列表并返回过滤后的 UsageWithTarget 列表
      */
-    private fun filterRelatedUsages(usages: List<UsageInfo>, phpClass: PhpClass): List<UsageInfo> {
-        val filtered = mutableListOf<UsageInfo>()
-        for (usage in usages) {
+    private fun filterRelatedUsages(usagesWithTarget: List<UsageWithTarget>, phpClass: PhpClass): List<UsageWithTarget> {
+        val filtered = mutableListOf<UsageWithTarget>()
+        for (uwt in usagesWithTarget) {
+            val usage = uwt.usageInfo
             val element = usage.element
             if (element == null) {
                 ProjectLogHelper.log(phpClass.project, "自动发现: filterRelatedUsages 跳过 element 为空")
@@ -457,7 +740,7 @@ class AutoDiscoverPatternSearchAction(
 
             val callerType = getCallerType(methodReference, phpClass)
             if (callerType != null) {
-                filtered.add(usage)
+                filtered.add(uwt)
             } else {
                 try {
                     val classRefText = methodReference.classReference?.text ?: "<no-classRef>"
@@ -546,6 +829,38 @@ class AutoDiscoverPatternSearchAction(
             }
         }
         return false
+    }
+
+    /**
+     * 在预览文本中高亮搜索关键字
+     */
+    private fun highlightSearchKeyword(textArea: JBTextArea, searchKeyword: String) {
+        try {
+            val document = textArea.document
+            val highlighter = textArea.highlighter
+            val text = textArea.text
+
+            // 移除之前的高亮
+            highlighter.removeAllHighlights()
+
+            // 查找并高亮关键字
+            var index = 0
+            while (index < text.length) {
+                val foundIndex = text.indexOf(searchKeyword, index, ignoreCase = true)
+                if (foundIndex == -1) break
+
+                // 创建高亮
+                val painter = javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(
+                    java.awt.Color.YELLOW
+                )
+                highlighter.addHighlight(foundIndex, foundIndex + searchKeyword.length, painter)
+
+                index = foundIndex + searchKeyword.length
+            }
+        } catch (ex: Throwable) {
+            // 高亮失败不影响功能
+            ProjectLogHelper.log(null, "自动发现: 预览高亮失败: ${ex.message}")
+        }
     }
 
     private fun notifyInfo(project: Project, content: String) {
