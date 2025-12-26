@@ -8,12 +8,17 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.aogg.core.search.helper.CoreAnnotationHelper
 import com.aogg.core.search.helper.ProjectLogHelper
 import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 
 /**
  * 核心搜索右键菜单动作组
  * 动态显示"搜索核心"菜单项，仅当类或其父类有 @core 注解时显示
  */
 class CoreSearchPopupAction : ActionGroup() {
+
+    override fun getActionUpdateThread(): ActionUpdateThread {
+        return ActionUpdateThread.BGT
+    }
 
     override fun getChildren(e: AnActionEvent?): Array<AnAction> {
         if (e == null) return emptyArray()

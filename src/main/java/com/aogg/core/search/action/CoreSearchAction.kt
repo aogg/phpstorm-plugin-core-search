@@ -10,12 +10,17 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.intellij.openapi.actionSystem.Separator
 import com.aogg.core.search.action.AutoDiscoverActionGroup
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 
 /**
  * 固定显示的核心搜索入口
  * 作为二级菜单，展示公开方法的 @core 关键词
  */
 class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索方法调用位置", null), DumbAware {
+
+    override fun getActionUpdateThread(): ActionUpdateThread {
+        return ActionUpdateThread.BGT
+    }
 
     override fun getChildren(e: AnActionEvent?): Array<AnAction> {
         if (e == null) return emptyArray()
