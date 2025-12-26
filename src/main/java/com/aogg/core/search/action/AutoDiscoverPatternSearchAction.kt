@@ -267,11 +267,11 @@ class AutoDiscoverPatternSearchAction(
         toolbar.add(titleLabel, java.awt.BorderLayout.WEST)
 
         // 隐藏按钮
-        val hideButton = javax.swing.JButton("隐藏")
-        hideButton.addActionListener {
-            toolWindow?.hide(null)
-        }
-        toolbar.add(hideButton, java.awt.BorderLayout.EAST)
+        // val hideButton = javax.swing.JButton("隐藏")
+        // hideButton.addActionListener {
+            // toolWindow?.hide(null)
+        // }
+        // toolbar.add(hideButton, java.awt.BorderLayout.EAST)
 
         // 主面板
         val mainPanel = javax.swing.JPanel(java.awt.BorderLayout())
