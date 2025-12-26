@@ -282,7 +282,6 @@ class AutoDiscoverPatternSearchAction(
 
         for (uwt in usagesWithTarget) {
             val info = uwt.usageInfo
-            val targetName = uwt.targetMethodName
             val element = info.element ?: continue
             val virtualFile = element.containingFile?.virtualFile ?: continue
             val doc = psiDocManager.getDocument(element.containingFile) ?: continue
@@ -296,7 +295,20 @@ class AutoDiscoverPatternSearchAction(
             } catch (_: Throwable) {
                 ""
             }
+
+            // 解析目标方法名和调用方法名
+            val methodRef = PsiTreeUtil.getParentOfType(
+                element,
+                com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                /* strict = */ false
+            )
+            val targetMethodName = try {
+                (methodRef?.resolve() as? Method)?.name ?: "<unknown-target>"
+            } catch (_: Throwable) {
+                "<unknown-target>"
+            }
             val callerMethodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
+
             val previewText = AutoDiscoverUiHelper.getMethodPreviewFromElement(element, 3)
             items.add(
                 DisplayItem(
@@ -305,16 +317,22 @@ class AutoDiscoverPatternSearchAction(
                     line = line,
                     preview = preview,
                     elementOffset = elemOffset,
-                    methodName = targetName,
+                    methodName = targetMethodName,
                     previewText = previewText,
-                    targetMethodName = targetName,
+                    targetMethodName = targetMethodName,
                     callerMethodName = callerMethodName
                 )
             )
         }
 
-        // 按方法名分组并创建树形结构（与弹窗一致的视图）
-        val groupedItems = items.groupBy { it.methodName }
+        // 按目标方法名分组（无法解析时归入"其他"分组）
+        val groupedItems = items.groupBy { item ->
+            if (item.targetMethodName.isNotEmpty() && item.targetMethodName != "<unknown-target>") {
+                item.targetMethodName
+            } else {
+                "其他"
+            }
+        }
 
         val rootNode = DefaultMutableTreeNode("搜索结果")
         for ((methodName, methodItems) in groupedItems) {
@@ -342,21 +360,59 @@ class AutoDiscoverPatternSearchAction(
         val treeModel = DefaultTreeModel(rootNode)
         val tree = JTree(treeModel)
         tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+        // 自定义渲染器：当节点的 userObject 为 DisplayItem 时，显示为 "相对路径 — 调用方法名"，并设置 tooltip 为完整路径
+        tree.cellRenderer = object : javax.swing.tree.DefaultTreeCellRenderer() {
+            override fun getTreeCellRendererComponent(
+                tree: javax.swing.JTree,
+                value: Any?,
+                selected: Boolean,
+                expanded: Boolean,
+                leaf: Boolean,
+                row: Int,
+                hasFocus: Boolean
+            ): java.awt.Component {
+                val comp = super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus)
+                try {
+                    if (value is DefaultMutableTreeNode && value.userObject is DisplayItem) {
+                        val item = value.userObject as DisplayItem
+                        val relPath = try {
+                            val base = project.basePath
+                            if (base != null) {
+                                java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                                    .replace(java.io.File.separatorChar, '/')
+                            } else item.filePath
+                        } catch (_: Throwable) {
+                            item.filePath
+                        }
+                        this.text = "$relPath — ${item.callerMethodName}"
+                        this.toolTipText = item.filePath
+                    }
+                } catch (_: Throwable) {
+                    // 渲染异常不应阻塞主流程，保留默认渲染
+                }
+                return comp
+            }
+        }
 
-        // 预览区域
-        val previewTextArea = JBTextArea()
-        previewTextArea.isEditable = false
-        previewTextArea.lineWrap = true
-        previewTextArea.wrapStyleWord = true
-        previewTextArea.rows = 15
-        val previewScrollPane = JBScrollPane(previewTextArea)
+        // 预览区域（使用编辑器）
+        val editorHolder = object {
+            var editor: com.intellij.openapi.editor.Editor? = null
+        }
+        val previewPanel = JPanel(BorderLayout())
+        val previewScrollPane = JBScrollPane(previewPanel)
 
         // 分割面板（左右分屏）
         val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         splitPane.leftComponent = JBScrollPane(tree)
         splitPane.rightComponent = previewScrollPane
         splitPane.resizeWeight = 0.4
-        splitPane.dividerLocation = 500
+        splitPane.dividerLocation = 400
+        splitPane.minimumSize = java.awt.Dimension(800, 600)
+        // 设置最小宽度
+        val leftScrollPane = splitPane.leftComponent as JBScrollPane
+        leftScrollPane.minimumSize = java.awt.Dimension(200, 0)
+        val rightScrollPane = splitPane.rightComponent as JBScrollPane
+        rightScrollPane.minimumSize = java.awt.Dimension(300, 0)
 
         // 控制面板（显示预览开关）
         val controlPanel = JPanel()
@@ -390,12 +446,65 @@ class AutoDiscoverPatternSearchAction(
                 val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
                 if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
                     val selectedItem = selectedNode.userObject as DisplayItem
-                    previewTextArea.text = if (selectedItem.previewText.isNotEmpty()) selectedItem.previewText else "无法获取方法预览"
-                    if (title.isNotEmpty()) {
-                        highlightSearchKeyword(previewTextArea, title)
+
+                    // 释放之前的编辑器
+                    AutoDiscoverUiHelper.releaseEditor(editorHolder.editor)
+                    editorHolder.editor = null
+
+                    // 获取目标方法进行预览
+                    val element = try {
+                        val psiFile = PsiManager.getInstance(project).findFile(com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(selectedItem.filePath)!!)
+                        psiFile?.findElementAt(selectedItem.elementOffset)
+                    } catch (ex: Throwable) {
+                        null
+                    }
+
+                    if (element != null) {
+                        val method = PsiTreeUtil.getParentOfType(element, com.jetbrains.php.lang.psi.elements.Method::class.java)
+                        if (method != null) {
+                            // 创建新的编辑器预览
+                            val newEditor = AutoDiscoverUiHelper.createEditorForMethodPreview(project, method, title)
+                            editorHolder.editor = newEditor
+                            if (newEditor != null) {
+                                previewPanel.removeAll()
+                                previewPanel.add(newEditor.component, BorderLayout.CENTER)
+                                previewPanel.revalidate()
+                                previewPanel.repaint()
+                            } else {
+                                previewPanel.removeAll()
+                                val fallbackTextArea = JBTextArea(if (selectedItem.previewText.isNotEmpty()) selectedItem.previewText else "无法获取方法预览")
+                                fallbackTextArea.isEditable = false
+                                previewPanel.add(fallbackTextArea, BorderLayout.CENTER)
+                                previewPanel.revalidate()
+                                previewPanel.repaint()
+                            }
+                        } else {
+                            previewPanel.removeAll()
+                            val fallbackTextArea = JBTextArea("无法找到对应的方法")
+                            fallbackTextArea.isEditable = false
+                            previewPanel.add(fallbackTextArea, BorderLayout.CENTER)
+                            previewPanel.revalidate()
+                            previewPanel.repaint()
+                        }
+                    } else {
+                        previewPanel.removeAll()
+                        val fallbackTextArea = JBTextArea("无法获取元素信息")
+                        fallbackTextArea.isEditable = false
+                        previewPanel.add(fallbackTextArea, BorderLayout.CENTER)
+                        previewPanel.revalidate()
+                        previewPanel.repaint()
                     }
                 } else {
-                    previewTextArea.text = "选择一个具体的结果项查看预览"
+                    // 释放之前的编辑器
+                    AutoDiscoverUiHelper.releaseEditor(editorHolder.editor)
+                    editorHolder.editor = null
+
+                    previewPanel.removeAll()
+                    val defaultTextArea = JBTextArea("选择一个具体的结果项查看预览")
+                    defaultTextArea.isEditable = false
+                    previewPanel.add(defaultTextArea, BorderLayout.CENTER)
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
                 }
             }
         })
@@ -429,6 +538,14 @@ class AutoDiscoverPatternSearchAction(
         // 设置工具窗口内容
         val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
         val content = contentFactory.createContent(mainPanel, title, false)
+
+        // 添加内容监听器，在内容移除时释放编辑器资源
+        content.addPropertyChangeListener { evt ->
+            if ("disposed" == evt.propertyName) {
+                AutoDiscoverUiHelper.releaseEditor(editorHolder.editor)
+            }
+        }
+
         toolWindow.contentManager.removeAllContents(false)
         toolWindow.contentManager.addContent(content)
 

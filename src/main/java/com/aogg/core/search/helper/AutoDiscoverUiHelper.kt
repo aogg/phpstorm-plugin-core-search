@@ -7,6 +7,19 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.LogicalPosition
+import com.intellij.openapi.editor.ScrollType
+import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.editor.colors.EditorColorsManager
+import com.intellij.openapi.editor.colors.EditorColorsScheme
+import com.intellij.openapi.editor.markup.HighlighterLayer
+import com.intellij.openapi.editor.markup.HighlighterTargetArea
+import com.intellij.openapi.editor.markup.RangeHighlighter
+import com.intellij.openapi.editor.markup.TextAttributes
+import java.awt.Color
+import com.intellij.openapi.editor.ex.EditorEx
 
 /**
  * UI 相关的辅助函数（对 UsageViewPresentation 使用反射尝试隐藏不需要的控件）
@@ -101,6 +114,112 @@ object AutoDiscoverUiHelper {
     fun getMethodPreviewFromElement(element: PsiElement, contextLines: Int = 3): String {
         val method = PsiTreeUtil.getParentOfType(element, Method::class.java)
         return if (method != null) getMethodPreviewText(method, contextLines) else ""
+    }
+
+    /**
+     * 创建只读编辑器用于预览目标方法
+     * @param project 项目实例
+     * @param method 目标方法
+     * @param searchKeyword 要高亮的搜索关键词
+     * @return 只读编辑器实例，失败时返回null
+     */
+    fun createEditorForMethodPreview(project: Project, method: Method, searchKeyword: String = ""): com.intellij.openapi.editor.Editor? {
+        return ReadAction.compute<com.intellij.openapi.editor.Editor?, Throwable> {
+            try {
+                val containingFile = method.containingFile ?: return@compute null
+                val virtualFile = containingFile.virtualFile ?: return@compute null
+                val document = FileDocumentManager.getInstance().getDocument(virtualFile) ?: return@compute null
+
+                // 创建只读编辑器（使用 createEditor 保证使用与主编辑器一致的颜色方案）
+                val editorFactory = EditorFactory.getInstance()
+                val editor = editorFactory.createEditor(document, project, virtualFile, /*isViewer=*/ true)
+
+                // 设置编辑器属性并强制应用全局配色方案以与主编辑器保持一致
+                try {
+                    val scheme: EditorColorsScheme = EditorColorsManager.getInstance().globalScheme
+                    if (editor is EditorEx) {
+                        editor.setOneLineMode(false)
+                        editor.isViewer = true
+                        editor.colorsScheme = scheme
+                    }
+                } catch (_: Throwable) {
+                    // 忽略配色设置失败，不影响主要功能
+                }
+
+                // 滚动到方法位置
+                val methodTextRange = method.textRange
+                val startLine = document.getLineNumber(methodTextRange.startOffset)
+                val startColumn = methodTextRange.startOffset - document.getLineStartOffset(startLine)
+
+                val logicalPosition = LogicalPosition(startLine, startColumn)
+                editor.caretModel.moveToLogicalPosition(logicalPosition)
+                editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
+
+                // 高亮搜索关键词
+                if (searchKeyword.isNotEmpty()) {
+                    highlightSearchKeywordInEditor(editor, searchKeyword)
+                }
+
+                return@compute editor
+            } catch (ex: Throwable) {
+                return@compute null
+            }
+        }
+    }
+
+    /**
+     * 在编辑器中高亮搜索关键词
+     * @param editor 编辑器实例
+     * @param searchKeyword 要高亮的关键词
+     */
+    private fun highlightSearchKeywordInEditor(editor: com.intellij.openapi.editor.Editor, searchKeyword: String) {
+        try {
+            val document = editor.document
+            val text = document.text
+            val markupModel = editor.markupModel
+
+            // 移除之前的高亮
+            markupModel.removeAllHighlighters()
+
+            // 查找并高亮所有匹配的关键词
+            var index = 0
+            while (index < text.length) {
+                val foundIndex = text.indexOf(searchKeyword, index, ignoreCase = true)
+                if (foundIndex == -1) break
+
+                // 创建高亮属性
+                val textAttributes = TextAttributes()
+                textAttributes.backgroundColor = Color.YELLOW
+                textAttributes.foregroundColor = Color.BLACK
+
+                // 添加高亮
+                markupModel.addRangeHighlighter(
+                    foundIndex,
+                    foundIndex + searchKeyword.length,
+                    HighlighterLayer.SELECTION - 1,
+                    textAttributes,
+                    HighlighterTargetArea.EXACT_RANGE
+                )
+
+                index = foundIndex + searchKeyword.length
+            }
+        } catch (ex: Throwable) {
+            // 高亮失败不影响功能
+        }
+    }
+
+    /**
+     * 释放编辑器资源
+     * @param editor 要释放的编辑器实例
+     */
+    fun releaseEditor(editor: com.intellij.openapi.editor.Editor?) {
+        if (editor != null) {
+            try {
+                EditorFactory.getInstance().releaseEditor(editor)
+            } catch (ex: Throwable) {
+                // 释放失败不影响功能
+            }
+        }
     }
 }
 
