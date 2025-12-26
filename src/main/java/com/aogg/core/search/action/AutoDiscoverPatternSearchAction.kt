@@ -349,7 +349,7 @@ class AutoDiscoverPatternSearchAction(
                 } catch (_: Throwable) {
                     item.filePath
                 }
-                val label = "${relPath} — ${item.callerMethodName}"
+                val label = "方法${item.callerMethodName} 文件(${relPath})"
                 val leafNode = DefaultMutableTreeNode(label)
                 leafNode.userObject = item
                 groupNode.add(leafNode)
