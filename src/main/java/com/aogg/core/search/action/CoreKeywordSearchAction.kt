@@ -456,23 +456,36 @@ class CoreKeywordSearchAction(
      * 显示用法搜索结果
      */
     private fun showUsages(project: Project, usages: List<Usage>, keyword: String) {
-        val usageTargets = emptyArray<UsageTarget>()
-        val presentation = UsageViewPresentation()
-        presentation.tabName = "核心搜索: $keyword"
-        presentation.tabText = "核心搜索: $keyword"
-        presentation.scopeText = "项目范围"
         try {
-            val hidden = com.aogg.core.search.helper.AutoDiscoverUiHelper.tryHidePresentationOptions(presentation)
-            ProjectLogHelper.log(project, "核心搜索: 尝试隐藏 UsageViewPresentation 选项 hidden=${hidden}")
+            // 优先使用工具窗口显示
+            com.aogg.core.search.helper.AutoDiscoverUiHelper.showCoreSearchToolWindow(project, usages, keyword)
         } catch (ex: Throwable) {
-            ProjectLogHelper.log(project, "核心搜索: 隐藏 UsageViewPresentation 选项失败 ex=${ex.message}")
+            ProjectLogHelper.log(project, "核心搜索: 工具窗口显示失败，回退到标准用法视图 keyword=$keyword ex=${ex.message}\n${ex.stackTraceToString()}")
+            try {
+                // 回退到标准UsageView显示
+                val usageTargets = emptyArray<UsageTarget>()
+                val presentation = UsageViewPresentation()
+                presentation.tabName = "核心搜索: $keyword"
+                presentation.tabText = "核心搜索: $keyword"
+                presentation.scopeText = "项目范围"
+                try {
+                    val hidden = com.aogg.core.search.helper.AutoDiscoverUiHelper.tryHidePresentationOptions(presentation)
+                    ProjectLogHelper.log(project, "核心搜索: 尝试隐藏 UsageViewPresentation 选项 hidden=${hidden}")
+                } catch (exUi: Throwable) {
+                    ProjectLogHelper.log(project, "核心搜索: 隐藏 UsageViewPresentation 选项失败 ex=${exUi.message}")
+                }
+
+                UsageViewManager.getInstance(project).showUsages(
+                    usageTargets,
+                    usages.toTypedArray(),
+                    presentation
+                )
+            } catch (exFallback: Throwable) {
+                ProjectLogHelper.log(project, "核心搜索: 标准用法视图显示也失败 keyword=$keyword ex=${exFallback.message}")
+                // 最后的失败通知
+                notifyInfo(project, "显示搜索结果失败，请查看日志")
+            }
         }
-        
-        UsageViewManager.getInstance(project).showUsages(
-            usageTargets,
-            usages.toTypedArray(),
-            presentation
-        )
     }
     
     /**
