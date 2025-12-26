@@ -579,6 +579,9 @@ object AutoDiscoverUiHelper {
 
         toolWindow.contentManager.addContent(finalContent)
 
+        // 激活新添加的tab
+        toolWindow.contentManager.setSelectedContent(finalContent)
+
         // 显示工具窗口
         toolWindow.show(null)
         ProjectLogHelper.log(project, "自动发现: 工具窗口已显示 title=$title items=${items.size}")
@@ -1090,6 +1093,9 @@ object AutoDiscoverUiHelper {
         } else content
 
         toolWindow.contentManager.addContent(finalContent)
+
+        // 激活新添加的tab
+        toolWindow.contentManager.setSelectedContent(finalContent)
 
         // 显示工具窗口
         toolWindow.show(null)
