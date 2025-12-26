@@ -21,7 +21,7 @@ except Exception:
 
 orig = data.get('prompt', '')
 
-new_prompt = "每次都需要跟新版本号然后打包 " + orig
+new_prompt = "每次都需要跟新版本号然后打包最后检测打包文件是否存在 " + orig
 
 result = {"continue": True, "prompt": new_prompt}
 
