@@ -6,6 +6,11 @@ import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.stubs.StubIndex
 import com.jetbrains.php.lang.psi.stubs.indexes.PhpClassIndex
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 /**
@@ -13,6 +18,91 @@ import java.util.regex.Pattern
  * 用于解析 PHPDoc 中的 @core 关键词注解
  */
 object CoreAnnotationHelper {
+
+    // 缓存类信息，避免重复解析
+    private data class CacheEntry(
+        val hasCoreAnnotation: Boolean,
+        val uniqueKeywords: Set<String>,
+        val timestamp: Long
+    )
+
+    private val cache = ConcurrentHashMap<String, CacheEntry>()
+
+    init {
+        // 监听文件变更，清除相关缓存
+        val connection = com.intellij.openapi.application.ApplicationManager.getApplication().messageBus.connect()
+        connection.subscribe(com.intellij.openapi.vfs.VirtualFileManager.VFS_CHANGES,
+            object : BulkFileListener {
+                override fun after(events: MutableList<out VFileEvent>) {
+                    for (event in events) {
+                        val file = event.file ?: continue
+                        if (file.extension?.lowercase() == "php") {
+                            // 清除所有缓存，因为很难确定具体哪些类受到了影响
+                            cache.clear()
+                            break
+                        }
+                    }
+                }
+            })
+    }
+
+    /**
+     * 获取缓存键
+     */
+    private fun getCacheKey(phpClass: PhpClass): String {
+        return phpClass.fqn ?: "unknown_${System.identityHashCode(phpClass)}"
+    }
+
+    /**
+     * 检查缓存是否有效
+     */
+    private fun isCacheValid(phpClass: PhpClass, entry: CacheEntry): Boolean {
+        val file = phpClass.containingFile?.virtualFile ?: return false
+        val currentTimestamp = file.modificationStamp
+        return entry.timestamp == currentTimestamp
+    }
+
+    /**
+     * 从缓存获取或计算结果
+     */
+    private fun getOrComputeCache(phpClass: PhpClass): CacheEntry {
+        val key = getCacheKey(phpClass)
+        val existing = cache[key]
+        if (existing != null && isCacheValid(phpClass, existing)) {
+            return existing
+        }
+
+        // 计算新结果
+        val hasCore = computeHasCoreAnnotation(phpClass)
+        val keywords = computeAllUniqueKeywords(phpClass)
+        val timestamp = phpClass.containingFile?.virtualFile?.modificationStamp ?: 0L
+
+        val entry = CacheEntry(hasCore, keywords, timestamp)
+        cache[key] = entry
+        return entry
+    }
+
+    /**
+     * 计算是否有核心注解（实际计算逻辑）
+     */
+    private fun computeHasCoreAnnotation(phpClass: PhpClass): Boolean {
+        // 检查当前类
+        if (hasCoreAnnotationInClass(phpClass)) {
+            return true
+        }
+
+        // 递归检查所有祖先类
+        val visited = mutableSetOf<String>()
+        return hasCoreAnnotationInAncestors(phpClass, visited)
+    }
+
+    /**
+     * 计算所有唯一关键词（实际计算逻辑）
+     */
+    private fun computeAllUniqueKeywords(phpClass: PhpClass): Set<String> {
+        val coreMethods = getAllCoreMethods(phpClass)
+        return coreMethods.keys
+    }
     
     // 缓存编译后的正则表达式
     private val CORE_PATTERN: Pattern = Pattern.compile("@core\\s+(.+)", Pattern.CASE_INSENSITIVE)
@@ -58,20 +148,16 @@ object CoreAnnotationHelper {
     
     /**
      * 检查类或其父类是否有 @core 注解的方法
-     * 
+     *
      * @param phpClass PHP 类元素
      * @return 如果类或其父类有 @core 注解的方法则返回 true
      */
     fun hasCoreAnnotation(phpClass: PhpClass): Boolean {
-        // 检查当前类
-        if (hasCoreAnnotationInClass(phpClass)) {
-            ProjectLogHelper.log(phpClass.project, "hasCoreAnnotation: class=${phpClass.fqn} self=true")
-            return true
+        val entry = getOrComputeCache(phpClass)
+        if (entry.hasCoreAnnotation) {
+            ProjectLogHelper.log(phpClass.project, "hasCoreAnnotation: class=${phpClass.fqn} cached=true")
         }
-        
-        // 递归检查所有祖先类
-        val visited = mutableSetOf<String>()
-        return hasCoreAnnotationInAncestors(phpClass, visited)
+        return entry.hasCoreAnnotation
     }
     
     /**
@@ -202,8 +288,9 @@ object CoreAnnotationHelper {
      * @return 唯一关键词集合
      */
     fun getAllUniqueKeywords(phpClass: PhpClass): Set<String> {
-        val coreMethods = getAllCoreMethods(phpClass)
-        return coreMethods.keys
+        val entry = getOrComputeCache(phpClass)
+        ProjectLogHelper.log(phpClass.project, "getAllUniqueKeywords: class=${phpClass.fqn} keywords=${entry.uniqueKeywords}")
+        return entry.uniqueKeywords
     }
 
     /**
