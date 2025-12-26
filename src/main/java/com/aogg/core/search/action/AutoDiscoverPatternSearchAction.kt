@@ -201,13 +201,13 @@ class AutoDiscoverPatternSearchAction(
         // 获取或创建工具窗口
         var toolWindow = toolWindowManager.getToolWindow(toolWindowId)
         if (toolWindow == null) {
-            // 如果工具窗口不存在，创建临时工具窗口
+            // 如果工具窗口不存在，创建永久工具窗口
             toolWindow = toolWindowManager.registerToolWindow(
                 RegisterToolWindowTask(
                     toolWindowId,
                     ToolWindowAnchor.TOP,
                     null,
-                    true
+                    false
                 )
             )
         }
