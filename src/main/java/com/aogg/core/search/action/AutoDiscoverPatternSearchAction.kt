@@ -205,7 +205,7 @@ class AutoDiscoverPatternSearchAction(
             toolWindow = toolWindowManager.registerToolWindow(
                 RegisterToolWindowTask(
                     toolWindowId,
-                    ToolWindowAnchor.TOP,
+                    ToolWindowAnchor.BOTTOM,
                     null,
                     false
                 )
