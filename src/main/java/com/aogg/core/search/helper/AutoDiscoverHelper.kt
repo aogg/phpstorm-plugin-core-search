@@ -2,6 +2,11 @@ package com.aogg.core.search.helper
 
 import com.aogg.core.search.settings.AutoDiscoverSettings
 import com.intellij.openapi.project.Project
+import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.searches.ReferencesSearch as RefSearch
+import com.intellij.psi.util.PsiTreeUtil
+import com.jetbrains.php.PhpIndex
+import com.intellij.psi.search.searches.ReferencesSearch
 import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.intellij.psi.PsiFile
@@ -115,6 +120,90 @@ object AutoDiscoverHelper {
      */
     fun clearCache() {
         cache.clear()
+    }
+
+    /**
+     * 判断给定模式是否存在至少一个调用，其调用方为目标类或目标类的子类
+     * 用于在自动发现中剔除明显与当前类无关的规则项
+     */
+    fun patternHasRelatedUsages(project: Project, phpClass: PhpClass, pattern: String): Boolean {
+        try {
+            val ignoreCase = AutoDiscoverSettings.getInstance(project).caseInsensitive
+            val regex = patternToRegex(pattern, ignoreCase)
+            // 检查 phpClass 的方法中哪些与 pattern 匹配
+            val methods = phpClass.methods.filter { method ->
+                val name = method.name ?: return@filter false
+                try {
+                    regex.matches(name)
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            if (methods.isEmpty()) return false
+
+            for (method in methods) {
+                val refs = RefSearch.search(method, GlobalSearchScope.projectScope(project), false).findAll()
+                for (ref in refs) {
+                    val element = ref.element ?: continue
+                    val methodReference = PsiTreeUtil.getParentOfType(
+                        element,
+                        com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                        false
+                    ) ?: continue
+
+                    val classRef = methodReference.classReference
+                    if (classRef != null && !classRef.text.startsWith("$")) {
+                        val className = classRef.text
+                        val phpIndex = PhpIndex.getInstance(project)
+                        val resolved = phpIndex.getAnyByFQN(className)
+                        for (r in resolved) {
+                            if (r is PhpClass) {
+                                if (isClassRelated(r, phpClass)) return true
+                                if (r.name == phpClass.name) return true
+                            }
+                        }
+                        if (className == phpClass.name) return true
+                    } else {
+                        val firstPsiChild = methodReference.firstPsiChild
+                        if (firstPsiChild is com.jetbrains.php.lang.psi.elements.PhpTypedElement) {
+                            val phpType = firstPsiChild.type
+                            val globalType = phpType.global(project)
+                            for (type in globalType.types) {
+                                val cleanFqn = type.toString().removePrefix("\\").removePrefix("#")
+                                val phpIndex = PhpIndex.getInstance(project)
+                                val classes = phpIndex.getClassesByFQN(cleanFqn)
+                                for (c in classes) {
+                                    if (isClassRelated(c, phpClass)) return true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (ex: Throwable) {
+            com.aogg.core.search.helper.ProjectLogHelper.log(project, "自动发现: patternHasRelatedUsages 异常 pattern=$pattern ex=${ex.message}")
+        }
+        return false
+    }
+
+    private fun isClassRelated(class1: PhpClass, class2: PhpClass): Boolean {
+        if (class1 == class2) return true
+        val visited = mutableSetOf<String>()
+        return checkInheritance(class1, class2, visited)
+    }
+
+    private fun checkInheritance(child: PhpClass, parent: PhpClass, visited: MutableSet<String>): Boolean {
+        val childFqn = child.fqn ?: return false
+        if (visited.contains(childFqn)) return false
+        visited.add(childFqn)
+        val superClasses = child.supers
+        for (superClass in superClasses) {
+            if (superClass is PhpClass) {
+                if (superClass == parent) return true
+                if (checkInheritance(superClass, parent, visited)) return true
+            }
+        }
+        return false
     }
 }
 

@@ -45,6 +45,8 @@ class AutoDiscoverActionGroup : ActionGroup("自动发现", "自动发现方法�
         }
         ProjectLogHelper.log(phpClass.project, "自动发现: getChildren: class=${phpClass.fqn}, matched=${matched}")
         if (matched.isNotEmpty()) {
+            // 直接显示所有匹配到的规则项（不再根据调用情况筛选）
+            ProjectLogHelper.log(phpClass.project, "自动发现: getChildren: class=${phpClass.fqn}, matchedToDisplay=${matched}")
             val actions = matched.map { pattern ->
                 AutoDiscoverPatternSearchAction(pattern, phpClass) as AnAction
             }.toTypedArray()

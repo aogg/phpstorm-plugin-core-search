@@ -461,6 +461,12 @@ class CoreKeywordSearchAction(
         presentation.tabName = "核心搜索: $keyword"
         presentation.tabText = "核心搜索: $keyword"
         presentation.scopeText = "项目范围"
+        try {
+            val hidden = com.aogg.core.search.helper.AutoDiscoverUiHelper.tryHidePresentationOptions(presentation)
+            ProjectLogHelper.log(project, "核心搜索: 尝试隐藏 UsageViewPresentation 选项 hidden=${hidden}")
+        } catch (ex: Throwable) {
+            ProjectLogHelper.log(project, "核心搜索: 隐藏 UsageViewPresentation 选项失败 ex=${ex.message}")
+        }
         
         UsageViewManager.getInstance(project).showUsages(
             usageTargets,

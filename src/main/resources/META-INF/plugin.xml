@@ -66,6 +66,12 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <applicationConfigurable implementation="com.aogg.core.search.settings.AutoDiscoverConfigurable" key="coreSearch.autoDiscover" displayName="核心搜索 - 自动发现"/>
+        <toolWindowFactory
+            factoryClass="com.aogg.core.search.ui.CoreSearchResultsToolWindowFactory"
+            id="Core Search Results"
+            anchor="bottom"
+            canCloseContents="true"
+            secondary="true"/>
     </extensions>
 
     <actions>
