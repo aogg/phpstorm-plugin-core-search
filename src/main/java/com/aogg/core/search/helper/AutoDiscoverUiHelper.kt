@@ -62,6 +62,9 @@ object AutoDiscoverUiHelper {
     /** 工具窗口ID */
     const val TOOL_WINDOW_ID = "Auto Discover Results"
 
+    /** tab计数器，用于生成唯一的tab标题 */
+    private var tabCounter = 0
+
     private val candidateMethods = listOf(
         "setShowUsageType",
         "setShowReadOnlyStatus",
@@ -542,7 +545,10 @@ object AutoDiscoverUiHelper {
 
         // 设置工具窗口内容
         val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
-        val content = contentFactory.createContent(mainPanel, title, false)
+        // 为避免重复标题，给每个tab添加序号后缀
+        tabCounter++
+        val uniqueTitle = "$title #$tabCounter"
+        val content = contentFactory.createContent(mainPanel, uniqueTitle, true)
 
         // 添加内容监听器，在内容移除时释放编辑器资源
         content.addPropertyChangeListener { evt ->
@@ -551,8 +557,27 @@ object AutoDiscoverUiHelper {
             }
         }
 
-        toolWindow.contentManager.removeAllContents(false)
-        toolWindow.contentManager.addContent(content)
+        // 确保新增tab而不是替换现有内容
+        // 先检查是否已存在相同标题的内容，如果有则使用不同的标题
+        val existingTitles = toolWindow.contentManager.contents.map { it.displayName }
+        var finalTitle = uniqueTitle
+        var counter = 1
+        while (existingTitles.contains(finalTitle)) {
+            finalTitle = "$uniqueTitle (${counter++})"
+        }
+
+        // 如果标题被修改了，重新创建content
+        val finalContent = if (finalTitle != uniqueTitle) {
+            contentFactory.createContent(mainPanel, finalTitle, true).apply {
+                addPropertyChangeListener { evt ->
+                    if ("disposed" == evt.propertyName) {
+                        releaseEditor(editorHolder.editor)
+                    }
+                }
+            }
+        } else content
+
+        toolWindow.contentManager.addContent(finalContent)
 
         // 显示工具窗口
         toolWindow.show(null)
@@ -1032,7 +1057,10 @@ object AutoDiscoverUiHelper {
 
         // 设置工具窗口内容
         val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
-        val content = contentFactory.createContent(mainPanel, "核心搜索: @$keyword", false)
+        // 为避免重复标题，给每个tab添加序号后缀
+        tabCounter++
+        val uniqueTitle = "核心搜索: @$keyword #$tabCounter"
+        val content = contentFactory.createContent(mainPanel, uniqueTitle, true)
 
         // 添加内容监听器，在内容移除时释放编辑器资源
         content.addPropertyChangeListener { evt ->
@@ -1041,8 +1069,27 @@ object AutoDiscoverUiHelper {
             }
         }
 
-        toolWindow.contentManager.removeAllContents(false)
-        toolWindow.contentManager.addContent(content)
+        // 确保新增tab而不是替换现有内容
+        // 先检查是否已存在相同标题的内容，如果有则使用不同的标题
+        val existingTitles = toolWindow.contentManager.contents.map { it.displayName }
+        var finalTitle = uniqueTitle
+        var counter = 1
+        while (existingTitles.contains(finalTitle)) {
+            finalTitle = "$uniqueTitle (${counter++})"
+        }
+
+        // 如果标题被修改了，重新创建content
+        val finalContent = if (finalTitle != uniqueTitle) {
+            contentFactory.createContent(mainPanel, finalTitle, true).apply {
+                addPropertyChangeListener { evt ->
+                    if ("disposed" == evt.propertyName) {
+                        releaseEditor(editorHolder.editor)
+                    }
+                }
+            }
+        } else content
+
+        toolWindow.contentManager.addContent(finalContent)
 
         // 显示工具窗口
         toolWindow.show(null)
