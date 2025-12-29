@@ -10,6 +10,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.intellij.openapi.actionSystem.Separator
 import com.aogg.core.search.action.AutoDiscoverActionGroup
+import com.aogg.core.search.action.FixedSearchActionGroup
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 
 /**
@@ -48,9 +49,10 @@ class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索�
         for (keyword in keywords) {
             list.add(CoreKeywordSearchAction(keyword, phpClass))
         }
-        // 分隔线后追加固定的自动发现二级菜单（在关键词之后）
+        // 分隔线后追加固定的自动发现和固定搜索二级菜单（在关键词之后）
         list.add(Separator.getInstance())
         list.add(AutoDiscoverActionGroup())
+        list.add(FixedSearchActionGroup())
         ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: class=${phpClass.fqn}, keywords=$keywords, actions=${list.size}")
         return list.toTypedArray()
     }
