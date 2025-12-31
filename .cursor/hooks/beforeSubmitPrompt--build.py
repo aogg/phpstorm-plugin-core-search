@@ -17,7 +17,7 @@ def main():
         orig = event.get("prompt", "")
 
         # Add build instruction
-        new_prompt = "每次都需要更新版本号然后打包，最后检测打包文件是否存在。 " + orig
+        new_prompt = "必须每次都需要更新版本号然后打包，必须最后检测打包文件是否存在。 " + orig
 
         # Update event
         event["prompt"] = new_prompt
