@@ -11,7 +11,7 @@ import com.intellij.ui.content.ContentFactory
 object CoreSearchResultsService {
     fun showSearchTab(project: Project, tabName: String, items: List<SearchDisplayItem>) {
         val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Core Search Results") ?: return
-        val panel = CoreSearchResultsPanel(items)
+        val panel = CoreSearchResultsPanel(items, project)
         val contentFactory = ContentFactory.SERVICE.getInstance()
         val content = contentFactory.createContent(panel.component, tabName, false)
         toolWindow.contentManager.addContent(content)
