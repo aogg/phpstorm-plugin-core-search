@@ -23,4 +23,5 @@ Thumbs.db
 
 # Logs
 *.log
+/bin
 
