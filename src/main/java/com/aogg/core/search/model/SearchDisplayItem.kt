@@ -8,7 +8,8 @@ data class SearchDisplayItem(
     val filePath: String,
     val line: Int,
     val preview: String,
-    val elementOffset: Int
+    val elementOffset: Int,
+    val lineContent: String = ""
 )
 
 

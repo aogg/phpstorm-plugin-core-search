@@ -768,12 +768,12 @@ object AutoDiscoverUiHelper {
             val line = doc.getLineNumber(elemOffset)
             val lineStart = doc.getLineStartOffset(line)
             val lineEnd = doc.getLineEndOffset(line)
-            val preview = try {
-                val raw = doc.getText(com.intellij.openapi.util.TextRange(lineStart, lineEnd)).trim()
-                if (raw.length > 120) raw.substring(0, 120) + "..." else raw
+            val lineContent = try {
+                doc.getText(com.intellij.openapi.util.TextRange(lineStart, lineEnd)).trim()
             } catch (_: Throwable) {
                 ""
             }
+            val preview = if (lineContent.length > 120) lineContent.substring(0, 120) + "..." else lineContent
 
             // 解析目标方法名和调用方法名
             val methodRef = PsiTreeUtil.getParentOfType(
@@ -799,7 +799,8 @@ object AutoDiscoverUiHelper {
                     methodName = targetMethodName,
                     previewText = previewText,
                     targetMethodName = targetMethodName,
-                    callerMethodName = callerMethodName
+                    callerMethodName = callerMethodName,
+                    lineContent = lineContent
                 )
             )
         }
@@ -815,25 +816,36 @@ object AutoDiscoverUiHelper {
 
         val rootNode = DefaultMutableTreeNode("搜索结果")
         for ((methodName, methodItems) in groupedItems) {
-            val groupNode = DefaultMutableTreeNode("$methodName (${methodItems.size})")
-            for (item in methodItems) {
-                val relPath = try {
-                    val base = project.basePath
-                    if (base != null) {
-                        java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
-                            .replace(java.io.File.separatorChar, '/')
-                    } else {
+            val methodNode = DefaultMutableTreeNode("$methodName (${methodItems.size})")
+            
+            // 第二层：按调用方法名分组
+            val callerGroups = methodItems.groupBy { it.callerMethodName.ifEmpty { "其他" } }
+            
+            for ((callerName, callerItems) in callerGroups) {
+                val callerNode = DefaultMutableTreeNode("$callerName (${callerItems.size})")
+                
+                for (item in callerItems) {
+                    val relPath = try {
+                        val base = project.basePath
+                        if (base != null) {
+                            java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                                .replace(java.io.File.separatorChar, '/')
+                        } else {
+                            item.filePath
+                        }
+                    } catch (_: Throwable) {
                         item.filePath
                     }
-                } catch (_: Throwable) {
-                    item.filePath
+                    // 显示行内容（去除首尾空白）
+                    val displayContent = if (item.lineContent.isNotBlank()) item.lineContent else item.callerMethodName
+                    val label = "$displayContent — $relPath"
+                    val leafNode = DefaultMutableTreeNode(label)
+                    leafNode.userObject = item
+                    callerNode.add(leafNode)
                 }
-                val label = "${item.callerMethodName} (${relPath})"
-                val leafNode = DefaultMutableTreeNode(label)
-                leafNode.userObject = item
-                groupNode.add(leafNode)
+                methodNode.add(callerNode)
             }
-            rootNode.add(groupNode)
+            rootNode.add(methodNode)
         }
 
         val treeModel = DefaultTreeModel(rootNode)
@@ -863,7 +875,8 @@ object AutoDiscoverUiHelper {
                         } catch (_: Throwable) {
                             item.filePath
                         }
-                        this.text = "$relPath — ${item.callerMethodName}"
+                        val displayContent = if (item.lineContent.isNotBlank()) item.lineContent else item.callerMethodName
+                        this.text = "$displayContent — $relPath"
                         this.toolTipText = item.filePath
                     }
                 } catch (_: Throwable) {
@@ -1130,12 +1143,13 @@ object AutoDiscoverUiHelper {
             val line = doc.getLineNumber(elemOffset)
             val lineStart = doc.getLineStartOffset(line)
             val lineEnd = doc.getLineEndOffset(line)
-            val preview = try {
-                val raw = doc.getText(TextRange(lineStart, lineEnd)).trim()
-                if (raw.length > 120) raw.substring(0, 120) + "..." else raw
+            val lineContent = try {
+                doc.getText(TextRange(lineStart, lineEnd)).trim()
             } catch (_: Throwable) {
                 ""
             }
+            val preview = if (lineContent.length > 120) lineContent.substring(0, 120) + "..." else lineContent
+
             val callerMethodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
             val methodRef = PsiTreeUtil.getParentOfType(
                 element,
@@ -1158,7 +1172,8 @@ object AutoDiscoverUiHelper {
                     methodName = targetName,
                     previewText = previewText,
                     targetMethodName = targetName,
-                    callerMethodName = callerMethodName
+                    callerMethodName = callerMethodName,
+                    lineContent = lineContent
                 )
             )
         }
@@ -1169,30 +1184,75 @@ object AutoDiscoverUiHelper {
         // 创建树形结构
         val rootNode = DefaultMutableTreeNode("搜索结果")
         for ((targetName, methodItems) in groupedItems) {
-            val groupNode = DefaultMutableTreeNode("$targetName (${methodItems.size})")
-            for (item in methodItems) {
-                val relPath = try {
-                    val base = project.basePath
-                    if (base != null) {
-                        java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
-                            .replace(java.io.File.separatorChar, '/')
-                    } else {
+            val methodNode = DefaultMutableTreeNode("$targetName (${methodItems.size})")
+            
+            // 第二层：按调用方法名分组
+            val callerGroups = methodItems.groupBy { it.callerMethodName.ifEmpty { "其他" } }
+            
+            for ((callerName, callerItems) in callerGroups) {
+                val callerNode = DefaultMutableTreeNode("$callerName (${callerItems.size})")
+                
+                for (item in callerItems) {
+                    val relPath = try {
+                        val base = project.basePath
+                        if (base != null) {
+                            java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                                .replace(java.io.File.separatorChar, '/')
+                        } else {
+                            item.filePath
+                        }
+                    } catch (_: Throwable) {
                         item.filePath
                     }
-                } catch (_: Throwable) {
-                    item.filePath
+                    val displayContent = if (item.lineContent.isNotBlank()) item.lineContent else item.callerMethodName
+                    val label = "$displayContent — $relPath"
+                    val leafNode = DefaultMutableTreeNode(label)
+                    leafNode.userObject = item // 存储完整的DisplayItem对象
+                    callerNode.add(leafNode)
                 }
-                val label = "${relPath} — ${item.callerMethodName}"
-                val leafNode = DefaultMutableTreeNode(label)
-                leafNode.userObject = item // 存储完整的DisplayItem对象
-                groupNode.add(leafNode)
+                methodNode.add(callerNode)
             }
-            rootNode.add(groupNode)
+            rootNode.add(methodNode)
         }
 
         val treeModel = DefaultTreeModel(rootNode)
         val tree = JTree(treeModel)
         tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+
+        // 自定义渲染器
+        tree.cellRenderer = object : DefaultTreeCellRenderer() {
+            override fun getTreeCellRendererComponent(
+                tree: JTree,
+                value: Any?,
+                selected: Boolean,
+                expanded: Boolean,
+                leaf: Boolean,
+                row: Int,
+                hasFocus: Boolean
+            ): java.awt.Component {
+                val comp = super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus)
+                try {
+                    if (value is DefaultMutableTreeNode && value.userObject is DisplayItem) {
+                        val item = value.userObject as DisplayItem
+                        val relPath = try {
+                            val base = project.basePath
+                            if (base != null) {
+                                java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                                    .replace(java.io.File.separatorChar, '/')
+                            } else item.filePath
+                        } catch (_: Throwable) {
+                            item.filePath
+                        }
+                        val displayContent = if (item.lineContent.isNotBlank()) item.lineContent else item.callerMethodName
+                        this.text = "$displayContent — $relPath"
+                        this.toolTipText = item.filePath
+                    }
+                } catch (_: Throwable) {
+                    // 渲染异常不应阻塞主流程，保留默认渲染
+                }
+                return comp
+            }
+        }
 
         // 预览区域（使用编辑器）
         val editorHolder = object {
@@ -1341,11 +1401,15 @@ object AutoDiscoverUiHelper {
 
         // 默认展开第一级节点并选择第一个叶子节点
         if (rootNode.childCount > 0) {
-            val firstGroupNode = rootNode.getChildAt(0) as DefaultMutableTreeNode
-            tree.expandPath(javax.swing.tree.TreePath(firstGroupNode.path))
-            if (firstGroupNode.childCount > 0) {
-                val firstLeafNode = firstGroupNode.getChildAt(0) as DefaultMutableTreeNode
-                tree.selectionPath = javax.swing.tree.TreePath(firstLeafNode.path)
+            val firstMethodNode = rootNode.getChildAt(0) as DefaultMutableTreeNode
+            tree.expandPath(javax.swing.tree.TreePath(firstMethodNode.path))
+            if (firstMethodNode.childCount > 0) {
+                val firstCallerNode = firstMethodNode.getChildAt(0) as DefaultMutableTreeNode
+                tree.expandPath(javax.swing.tree.TreePath(firstCallerNode.path))
+                if (firstCallerNode.childCount > 0) {
+                    val firstLeafNode = firstCallerNode.getChildAt(0) as DefaultMutableTreeNode
+                    tree.selectionPath = javax.swing.tree.TreePath(firstLeafNode.path)
+                }
             }
         }
 
@@ -1428,12 +1492,12 @@ object AutoDiscoverUiHelper {
             val line = doc.getLineNumber(elemOffset)
             val lineStart = doc.getLineStartOffset(line)
             val lineEnd = doc.getLineEndOffset(line)
-            val preview = try {
-                val raw = doc.getText(TextRange(lineStart, lineEnd)).trim()
-                if (raw.length > 120) raw.substring(0, 120) + "..." else raw
+            val lineContent = try {
+                doc.getText(TextRange(lineStart, lineEnd)).trim()
             } catch (_: Throwable) {
                 ""
             }
+            val preview = if (lineContent.length > 120) lineContent.substring(0, 120) + "..." else lineContent
 
             val callerMethodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
             val previewText = getMethodPreviewFromElement(element, 3)
@@ -1448,41 +1512,53 @@ object AutoDiscoverUiHelper {
                     methodName = callerMethodName,
                     previewText = previewText,
                     targetMethodName = keyword, // 使用关键词作为目标方法名
-                    callerMethodName = callerMethodName
+                    callerMethodName = callerMethodName,
+                    lineContent = lineContent
                 )
             )
         }
 
-        // 按调用方法名分组
+        // 核心搜索结果直接按照 目标方法名（关键词） -> 调用方法名 -> 结果 组织
+        // 但由于核心搜索本身就是针对某个关键词（即目标方法名），所以第一层其实就是该关键词，或者我们可以省略第一层，
+        // 不过为了保持一致性，我们还是用3层： Keyword -> Caller Method -> Usage
+        // 但由于keyword是传入的参数，所以所有item的targetMethodName应该都是keyword
+
         val groupedItems = items.groupBy { item ->
-            if (item.callerMethodName.isNotEmpty() && item.callerMethodName != "<no-method>") {
-                item.callerMethodName
-            } else {
-                "其他"
-            }
+            item.targetMethodName.ifEmpty { keyword }
         }
 
         val rootNode = DefaultMutableTreeNode("核心搜索结果")
-        for ((methodName, methodItems) in groupedItems) {
-            val groupNode = DefaultMutableTreeNode("$methodName (${methodItems.size})")
-            for (item in methodItems) {
-                val relPath = try {
-                    val base = project.basePath
-                    if (base != null) {
-                        File(base).toPath().relativize(File(item.filePath).toPath()).toString()
-                            .replace(File.separatorChar, '/')
-                    } else {
+        for ((targetName, methodItems) in groupedItems) {
+            val targetNode = DefaultMutableTreeNode("$targetName (${methodItems.size})")
+            
+            // 第二层：按调用方法名分组
+            val callerGroups = methodItems.groupBy { it.callerMethodName.ifEmpty { "其他" } }
+            
+            for ((callerName, callerItems) in callerGroups) {
+                val callerNode = DefaultMutableTreeNode("$callerName (${callerItems.size})")
+                
+                for (item in callerItems) {
+                    val relPath = try {
+                        val base = project.basePath
+                        if (base != null) {
+                            java.io.File(base).toPath().relativize(java.io.File(item.filePath).toPath()).toString()
+                                .replace(java.io.File.separatorChar, '/')
+                        } else {
+                            item.filePath
+                        }
+                    } catch (_: Throwable) {
                         item.filePath
                     }
-                } catch (_: Throwable) {
-                    item.filePath
+                    // 显示行内容（去除首尾空白）
+                    val displayContent = if (item.lineContent.isNotBlank()) item.lineContent else item.callerMethodName
+                    val label = "$displayContent — $relPath"
+                    val leafNode = DefaultMutableTreeNode(label)
+                    leafNode.userObject = item
+                    callerNode.add(leafNode)
                 }
-                val label = "$relPath — $keyword"
-                val leafNode = DefaultMutableTreeNode(label)
-                leafNode.userObject = item
-                groupNode.add(leafNode)
+                targetNode.add(callerNode)
             }
-            rootNode.add(groupNode)
+            rootNode.add(targetNode)
         }
 
         val treeModel = DefaultTreeModel(rootNode)
@@ -1513,7 +1589,9 @@ object AutoDiscoverUiHelper {
                         } catch (_: Throwable) {
                             item.filePath
                         }
-                        this.text = "$relPath — ${item.callerMethodName}"
+                        // 兼容旧代码，如果没有lineContent字段则不显示
+                        val displayContent = if (item.lineContent.isNotBlank()) item.lineContent else item.methodName
+                        this.text = "$displayContent — $relPath"
                         this.toolTipText = item.filePath
                     }
                 } catch (_: Throwable) {
@@ -1713,8 +1791,12 @@ object AutoDiscoverUiHelper {
             val firstGroupNode = rootNode.getChildAt(0) as DefaultMutableTreeNode
             tree.expandPath(javax.swing.tree.TreePath(firstGroupNode.path))
             if (firstGroupNode.childCount > 0) {
-                val firstLeafNode = firstGroupNode.getChildAt(0) as DefaultMutableTreeNode
-                tree.selectionPath = javax.swing.tree.TreePath(firstLeafNode.path)
+                val firstCallerNode = firstGroupNode.getChildAt(0) as DefaultMutableTreeNode
+                tree.expandPath(javax.swing.tree.TreePath(firstCallerNode.path))
+                if (firstCallerNode.childCount > 0) {
+                    val firstLeafNode = firstCallerNode.getChildAt(0) as DefaultMutableTreeNode
+                    tree.selectionPath = javax.swing.tree.TreePath(firstLeafNode.path)
+                }
             }
         }
 

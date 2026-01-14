@@ -38,7 +38,9 @@ class CoreSearchResultsPanel(private val items: List<SearchDisplayItem>, private
         for ((group, list) in groupMap) {
             val groupNode = DefaultMutableTreeNode(group)
             for (hit in list) {
-                val leaf = DefaultMutableTreeNode("${hit.methodName} — ${hit.filePath}:${hit.line + 1}")
+                // 显示行内容（去除首尾空白）和文件路径
+                val displayContent = if (hit.lineContent.isNotBlank()) hit.lineContent else hit.methodName
+                val leaf = DefaultMutableTreeNode("$displayContent — ${hit.filePath}:${hit.line + 1}")
                 leaf.userObject = hit
                 groupNode.add(leaf)
             }

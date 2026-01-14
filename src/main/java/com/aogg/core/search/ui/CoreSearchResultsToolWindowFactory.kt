@@ -34,6 +34,7 @@ class CoreSearchResultsToolWindowFactory : ToolWindowFactory {
             val content: Content = contentFactory.createContent(panel.component, tabName, false)
             // 支持关闭和刷新：允许用户关闭 tab
             toolWindow.contentManager.addContent(content)
+            toolWindow.contentManager.setSelectedContent(content)
             toolWindow.show(null)
         }
     }

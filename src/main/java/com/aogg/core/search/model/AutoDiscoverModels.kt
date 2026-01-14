@@ -14,7 +14,8 @@ data class DisplayItem(
     val methodName: String = "",
     val previewText: String = "",
     val targetMethodName: String = "",
-    val callerMethodName: String = ""
+    val callerMethodName: String = "",
+    val lineContent: String = ""
 )
 
 /**

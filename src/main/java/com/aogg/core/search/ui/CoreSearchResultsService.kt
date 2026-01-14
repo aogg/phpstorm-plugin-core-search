@@ -15,6 +15,7 @@ object CoreSearchResultsService {
         val contentFactory = ContentFactory.SERVICE.getInstance()
         val content = contentFactory.createContent(panel.component, tabName, false)
         toolWindow.contentManager.addContent(content)
+        toolWindow.contentManager.setSelectedContent(content)
         toolWindow.show(null)
     }
 }
