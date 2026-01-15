@@ -28,32 +28,37 @@ class CoreSearchAction : ActionGroup("搜索核心", "根据 @core 注解搜索�
 
         val phpClass = resolvePhpClass(e.dataContext) ?: run {
             ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: phpClass null")
-            // 没有解析到类时仍然显示占位信息并追加固定的自动发现入口
-            return arrayOf(CoreSearchInfoAction("未找到 PHP 类"), Separator.getInstance(), AutoDiscoverActionGroup())
-        }
-
-        if (!CoreAnnotationHelper.hasCoreAnnotation(phpClass)) {
-            ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: no core annotations for class=${phpClass.fqn}")
-            // 无 @core 注解时仍保留自动发现入口用于按方法名规则查找
-            return arrayOf(CoreSearchInfoAction("未找到 @core 注解"), Separator.getInstance(), AutoDiscoverActionGroup())
-        }
-
-        val keywords = CoreAnnotationHelper.getAllUniqueKeywords(phpClass).sorted()
-        if (keywords.isEmpty()) {
-            ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: keywords empty for class=${phpClass.fqn}")
-            // 关键词为空时仍显示自动发现入口
-            return arrayOf(CoreSearchInfoAction("未找到 @core 关键词"), Separator.getInstance(), AutoDiscoverActionGroup())
+            // 没有解析到类时仍然显示占位信息并追加固定的自动发现入口和固定搜索
+            return arrayOf(CoreSearchInfoAction("未找到 PHP 类"), Separator.getInstance(), AutoDiscoverActionGroup(), FixedSearchActionGroup())
         }
 
         val list = mutableListOf<AnAction>()
-        for (keyword in keywords) {
-            list.add(CoreKeywordSearchAction(keyword, phpClass))
+
+        // 检查是否有@core注解和关键词
+        if (CoreAnnotationHelper.hasCoreAnnotation(phpClass)) {
+            val keywords = CoreAnnotationHelper.getAllUniqueKeywords(phpClass).sorted()
+            if (keywords.isNotEmpty()) {
+                // 有关键词时，添加关键词搜索项
+                for (keyword in keywords) {
+                    list.add(CoreKeywordSearchAction(keyword, phpClass))
+                }
+                ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: class=${phpClass.fqn}, keywords=$keywords")
+            } else {
+                // 有注解但无关键词时显示占位信息
+                list.add(CoreSearchInfoAction("未找到 @core 关键词"))
+                ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: keywords empty for class=${phpClass.fqn}")
+            }
+        } else {
+            // 无@core注解时显示占位信息
+            list.add(CoreSearchInfoAction("未找到 @core 注解"))
+            ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: no core annotations for class=${phpClass.fqn}")
         }
-        // 分隔线后追加固定的自动发现和固定搜索二级菜单（在关键词之后）
+
+        // 分隔线后追加固定的自动发现和固定搜索二级菜单
         list.add(Separator.getInstance())
         list.add(AutoDiscoverActionGroup())
         list.add(FixedSearchActionGroup())
-        ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: class=${phpClass.fqn}, keywords=$keywords, actions=${list.size}")
+        ProjectLogHelper.log(e.project, "CoreSearchAction.getChildren: final actions count=${list.size}")
         return list.toTypedArray()
     }
 
