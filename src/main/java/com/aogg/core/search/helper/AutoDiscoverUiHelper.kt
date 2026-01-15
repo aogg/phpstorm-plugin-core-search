@@ -160,18 +160,20 @@ object AutoDiscoverUiHelper {
      * @param project 项目实例
      * @param method 目标方法
      * @param searchKeyword 要高亮的搜索关键词
+     * @param targetLine 要定位到的目标行（如果为null则定位到方法起始行）
      * @return 只读编辑器实例，失败时返回null
      */
-    fun createEditorForMethodPreview(project: Project, method: Method, searchKeyword: String = ""): com.intellij.openapi.editor.Editor? {
+    fun createEditorForMethodPreview(project: Project, method: Method, searchKeyword: String = "", targetLine: Int? = null): com.intellij.openapi.editor.Editor? {
         return ReadAction.compute<com.intellij.openapi.editor.Editor?, Throwable> {
             try {
                 val containingFile = method.containingFile ?: return@compute null
                 val virtualFile = containingFile.virtualFile ?: return@compute null
                 val document = FileDocumentManager.getInstance().getDocument(virtualFile) ?: return@compute null
 
-                // 记录正在创建编辑器预览的文件和行号
-                val methodLine = document.getLineNumber(method.textRange.startOffset)
-                ProjectLogHelper.log(project, "Auto Discover: 创建方法预览编辑器 ${method.name} 在文件 ${virtualFile.path} 第${methodLine + 1}行")
+                // 确定定位行：优先使用传入的 targetLine，否则使用方法起始行
+                val methodStartLine = document.getLineNumber(method.textRange.startOffset)
+                val scrollToLine = targetLine ?: methodStartLine
+                ProjectLogHelper.log(project, "Auto Discover: 创建方法预览编辑器 ${method.name} 在文件 ${virtualFile.path}，方法起始行=${methodStartLine + 1}，定位行=${scrollToLine + 1}")
 
                 // 创建只读编辑器（使用 createEditor 保证使用与主编辑器一致的颜色方案）
                 val editorFactory = EditorFactory.getInstance()
@@ -189,98 +191,86 @@ object AutoDiscoverUiHelper {
                     // 忽略配色设置失败，不影响主要功能
                 }
 
-                // 添加HierarchyListener，确保在组件真正显示后再滚动和高亮
-                val editorComponent = editor.component
-                var hierarchyListenerAdded = false
-                val hierarchyListener = object : java.awt.event.HierarchyListener {
-                    override fun hierarchyChanged(e: java.awt.event.HierarchyEvent) {
-                        if ((e.changeFlags and java.awt.event.HierarchyEvent.SHOWING_CHANGED.toLong()) != 0L &&
-                            editorComponent.isShowing
-                        ) {
-                            ProjectLogHelper.log(project, "Auto Discover: 编辑器组件已显示，开始滚动和高亮")
-                            try {
-                                // 计算目标行的逻辑位置（使用行号）
-                                val logicalPosition = LogicalPosition(methodLine, 0)
-                                ProjectLogHelper.log(project, "Auto Discover: 计算滚动目标位置: 第${methodLine + 1}行, logicalPosition=$logicalPosition")
+                // 使用更可靠的滚动策略：监听组件显示事件 + 延迟执行
+                val scrollRunnableHolder = object {
+                    var scrollAttempted = false
+                    
+                    fun performScroll() {
+                        if (scrollAttempted) return // 防止重复执行
+                        scrollAttempted = true
 
-                                // 设置光标位置
-                                editor.caretModel.moveToLogicalPosition(logicalPosition)
-
-                                // 滚动到目标位置（使用外层滚动条）
-                                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                                    try {
-                                        scrollEditorToLineUsingOuterScrollPane(editor, methodLine, project)
-
-                                        // 高亮搜索关键词（在滚动完成后执行）
-                                        if (searchKeyword.isNotEmpty()) {
-                                            highlightSearchKeywordInEditor(editor, searchKeyword)
-                                        }
-                                    } catch (ex: Throwable) {
-                                        ProjectLogHelper.log(project, "Auto Discover: CENTER 滚动失败: ${ex.message}")
-                                    }
-                                }
-                            } catch (ex: Throwable) {
-                                ProjectLogHelper.log(project, "Auto Discover: 滚动和高亮处理失败: ${ex.message}")
-                            } finally {
-                                // 移除监听器，避免重复执行
-                                editorComponent.removeHierarchyListener(this)
-                                hierarchyListenerAdded = false
-                            }
-                        }
-                    }
-                }
-
-                // 添加监听器
-                editorComponent.addHierarchyListener(hierarchyListener)
-                hierarchyListenerAdded = true
-                ProjectLogHelper.log(project, "Auto Discover: 已添加 HierarchyListener 监听编辑器显示状态")
-
-                // 计算逻辑位置，用于后续滚动操作
-                val logicalPosition = LogicalPosition(methodLine, 0)
-
-                // 改进：立即尝试滚动，如果组件已经显示则直接执行，否则等待 SHOWING_CHANGED 事件
-                if (editorComponent.isShowing) {
-                    ProjectLogHelper.log(project, "Auto Discover: 编辑器组件已显示，立即执行滚动和高亮")
-                    try {
-                        editor.caretModel.moveToLogicalPosition(logicalPosition)
-                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                            try {
-                                scrollEditorToLineUsingOuterScrollPane(editor, methodLine, project)
-
-                                if (searchKeyword.isNotEmpty()) {
-                                    highlightSearchKeywordInEditor(editor, searchKeyword)
-                                }
-                            } catch (ex: Throwable) {
-                                ProjectLogHelper.log(project, "Auto Discover: 立即 CENTER 滚动失败: ${ex.message}")
-                            }
-                        }
-                        // 移除监听器，因为已经执行了滚动
-                        editorComponent.removeHierarchyListener(hierarchyListener)
-                        hierarchyListenerAdded = false
-                    } catch (ex: Throwable) {
-                        ProjectLogHelper.log(project, "Auto Discover: 立即滚动失败，等待监听器: ${ex.message}")
-                    }
-                }
-
-                // 备用方案：如果5秒后组件还没显示，强制执行一次滚动
-                com.intellij.util.Alarm().addRequest({
-                    if (hierarchyListenerAdded) {
-                        ProjectLogHelper.log(project, "Auto Discover: 备用方案触发，组件仍未显示，尝试强制滚动")
                         try {
-                            scrollEditorToLineUsingOuterScrollPane(editor, methodLine, project)
+                            // 确保编辑器组件已经添加到容器中且可见
+                            val editorComponent = editor.component
+                            if (!editorComponent.isShowing) {
+                                ProjectLogHelper.log(project, "Auto Discover: 编辑器组件尚未显示，延迟滚动")
+                                // 如果组件还没显示，重新调度
+                                scrollAttempted = false // 重置标志，允许重试
+                                com.intellij.util.Alarm().addRequest({ performScroll() }, 100)
+                                return
+                            }
+
+                            // 使用 LogicalPosition 进行滚动（IntelliJ 的 scrollTo 方法接受 LogicalPosition）
+                            val logicalPosition = LogicalPosition(scrollToLine, 0)
+
+                            ProjectLogHelper.log(project, "Auto Discover: 滚动到第${scrollToLine + 1}行 - logicalPosition=$logicalPosition, 组件显示状态=${editorComponent.isShowing}")
+
+                            // 先设置光标位置
                             editor.caretModel.moveToLogicalPosition(logicalPosition)
+
+                            // 滚动到目标位置（使用 CENTER 确保在窗口中央）
                             editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
+
+                            // 高亮搜索关键词
                             if (searchKeyword.isNotEmpty()) {
                                 highlightSearchKeywordInEditor(editor, searchKeyword)
                             }
-                            ProjectLogHelper.log(project, "Auto Discover: 备用 CENTER 滚动完成")
+
+                            // 验证滚动是否成功
+                            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                                try {
+                                    val visibleArea = editor.scrollingModel.visibleArea
+                                    val targetY = editor.logicalPositionToXY(logicalPosition).y
+                                    val isScrollSuccessful = targetY >= visibleArea.y && targetY <= (visibleArea.y + visibleArea.height)
+
+                                    ProjectLogHelper.log(project, "Auto Discover: 滚动验证 - 目标行Y=$targetY, 可见区域=$visibleArea, 滚动成功=$isScrollSuccessful")
+
+                                    if (!isScrollSuccessful) {
+                                        ProjectLogHelper.log(project, "Auto Discover: 滚动失败，尝试使用备用滚动方法")
+                                        // 备用滚动方案：使用外层滚动面板
+                                        scrollEditorToLineUsingOuterScrollPane(editor, scrollToLine, project)
+                                    } else {
+                                        ProjectLogHelper.log(project, "Auto Discover: 滚动成功")
+                                    }
+                                } catch (verifyEx: Throwable) {
+                                    ProjectLogHelper.log(project, "Auto Discover: 滚动验证失败: ${verifyEx.message}")
+                                }
+                            }
+
+                            ProjectLogHelper.log(project, "Auto Discover: 滚动和高亮完成")
                         } catch (ex: Throwable) {
-                            ProjectLogHelper.log(project, "Auto Discover: 备用滚动失败: ${ex.message}")
-                        } finally {
-                            editorComponent.removeHierarchyListener(hierarchyListener)
+                            ProjectLogHelper.log(project, "Auto Discover: 滚动失败: ${ex.message}")
+                            // 失败时尝试备用方案
+                            try {
+                                scrollEditorToLineUsingOuterScrollPane(editor, scrollToLine, project)
+                            } catch (fallbackEx: Throwable) {
+                                ProjectLogHelper.log(project, "Auto Discover: 备用滚动也失败: ${fallbackEx.message}")
+                            }
                         }
                     }
-                }, 5000)
+                }
+
+                // 首先尝试立即执行
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+
+                // 如果立即执行可能失败，再次尝试延迟执行
+                com.intellij.util.Alarm().addRequest({
+                    if (!scrollRunnableHolder.scrollAttempted) {
+                        ProjectLogHelper.log(project, "Auto Discover: 初始滚动未执行，重试")
+                        scrollRunnableHolder.scrollAttempted = false
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+                    }
+                }, 50)
 
                 return@compute editor
             } catch (ex: Throwable) {
@@ -583,108 +573,86 @@ object AutoDiscoverUiHelper {
                 // 计算有效行号，确保在有效范围内
                 val effectiveLine = maxOf(0, minOf(line, document.lineCount - 1))
 
-                // 添加HierarchyListener，确保在组件真正显示后再滚动和高亮
-                val editorComponent = editor.component
-                var hierarchyListenerAdded = false
-                val hierarchyListener = object : java.awt.event.HierarchyListener {
-                    override fun hierarchyChanged(e: java.awt.event.HierarchyEvent) {
-                        if ((e.changeFlags and java.awt.event.HierarchyEvent.SHOWING_CHANGED.toLong()) != 0L &&
-                            editorComponent.isShowing
-                        ) {
-                            ProjectLogHelper.log(project, "Auto Discover: 文件预览编辑器组件已显示，开始滚动和高亮")
-                            try {
-                                // 计算目标行的逻辑位置
-                                val logicalPosition = LogicalPosition(effectiveLine, 0)
-                                editor.caretModel.moveToLogicalPosition(logicalPosition)
+                // 使用更可靠的滚动策略：监听组件显示事件 + 延迟执行
+                val scrollRunnableHolder = object {
+                    var scrollAttempted = false
+                    
+                    fun performScroll() {
+                        if (scrollAttempted) return // 防止重复执行
+                        scrollAttempted = true
 
-                                // 滚动到目标位置（使用CENTER确保居中显示）
-                                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                                    try {
-                                        editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
-                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览 CENTER 滚动完成，行=${effectiveLine}")
-
-                                        // 短暂延迟后高亮
-                                        com.intellij.util.Alarm().addRequest({
-                                            try {
-                                                if (!editor.isDisposed && searchKeyword.isNotEmpty()) {
-                                                    highlightSearchKeywordInEditor(editor, searchKeyword)
-                                                }
-                                            } catch (ex: Throwable) {
-                                                ProjectLogHelper.log(project, "Auto Discover: 文件预览高亮失败: ${ex.message}")
-                                            }
-                                        }, 100)
-                                    } catch (ex: Throwable) {
-                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览 CENTER 滚动失败: ${ex.message}")
-                                    }
-                                }
-                            } catch (ex: Throwable) {
-                                ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动和高亮处理失败: ${ex.message}")
-                            } finally {
-                                // 移除监听器，避免重复执行
-                                editorComponent.removeHierarchyListener(this)
-                                hierarchyListenerAdded = false
-                            }
-                        }
-                    }
-                }
-
-                // 添加监听器
-                editorComponent.addHierarchyListener(hierarchyListener)
-                hierarchyListenerAdded = true
-                ProjectLogHelper.log(project, "Auto Discover: 已为文件预览添加 HierarchyListener")
-
-                // 改进：立即尝试滚动，如果组件已经显示则直接执行，否则等待 SHOWING_CHANGED 事件
-                if (editorComponent.isShowing) {
-                    ProjectLogHelper.log(project, "Auto Discover: 文件预览组件已显示，立即执行滚动")
-                    try {
-                        val logicalPosition = LogicalPosition(effectiveLine, 0)
-                        editor.caretModel.moveToLogicalPosition(logicalPosition)
-                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                            try {
-                                editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
-                                ProjectLogHelper.log(project, "Auto Discover: 文件预览立即 CENTER 滚动完成，行=${effectiveLine}")
-
-                                // 短暂延迟后高亮
-                                com.intellij.util.Alarm().addRequest({
-                                    try {
-                                        if (!editor.isDisposed && searchKeyword.isNotEmpty()) {
-                                            highlightSearchKeywordInEditor(editor, searchKeyword)
-                                        }
-                                    } catch (ex: Throwable) {
-                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览立即高亮失败: ${ex.message}")
-                                    }
-                                }, 100)
-                            } catch (ex: Throwable) {
-                                ProjectLogHelper.log(project, "Auto Discover: 文件预览立即 CENTER 滚动失败: ${ex.message}")
-                            }
-                        }
-                        // 移除监听器，因为已经执行了滚动
-                        editorComponent.removeHierarchyListener(hierarchyListener)
-                        hierarchyListenerAdded = false
-                    } catch (ex: Throwable) {
-                        ProjectLogHelper.log(project, "Auto Discover: 文件预览立即滚动失败，等待监听器: ${ex.message}")
-                    }
-                }
-
-                // 备用方案：如果5秒后组件还没显示，强制执行一次滚动
-                com.intellij.util.Alarm().addRequest({
-                    if (hierarchyListenerAdded) {
-                        ProjectLogHelper.log(project, "Auto Discover: 文件预览备用方案触发，尝试强制滚动")
                         try {
+                            // 确保编辑器组件已经添加到容器中且可见
+                            val editorComponent = editor.component
+                            if (!editorComponent.isShowing) {
+                                ProjectLogHelper.log(project, "Auto Discover: 文件预览编辑器组件尚未显示，延迟滚动")
+                                // 如果组件还没显示，重新调度
+                                scrollAttempted = false // 重置标志，允许重试
+                                com.intellij.util.Alarm().addRequest({ performScroll() }, 100)
+                                return
+                            }
+
+                            // 使用 LogicalPosition 进行滚动（IntelliJ 的 scrollTo 方法接受 LogicalPosition）
                             val logicalPosition = LogicalPosition(effectiveLine, 0)
+
+                            ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动到第${effectiveLine + 1}行 - logicalPosition=$logicalPosition, 组件显示状态=${editorComponent.isShowing}")
+
+                            // 先设置光标位置
                             editor.caretModel.moveToLogicalPosition(logicalPosition)
+
+                            // 滚动到目标位置（使用 CENTER 确保在窗口中央）
                             editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
+
+                            // 高亮搜索关键词
                             if (searchKeyword.isNotEmpty()) {
                                 highlightSearchKeywordInEditor(editor, searchKeyword)
                             }
-                            ProjectLogHelper.log(project, "Auto Discover: 文件预览备用 CENTER 滚动完成")
+
+                            // 验证滚动是否成功
+                            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                                try {
+                                    val visibleArea = editor.scrollingModel.visibleArea
+                                    val targetY = editor.logicalPositionToXY(logicalPosition).y
+                                    val isScrollSuccessful = targetY >= visibleArea.y && targetY <= (visibleArea.y + visibleArea.height)
+
+                                    ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动验证 - 目标行Y=$targetY, 可见区域=$visibleArea, 滚动成功=$isScrollSuccessful")
+
+                                    if (!isScrollSuccessful) {
+                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动失败，尝试使用备用滚动方法")
+                                        // 备用滚动方案：使用外层滚动面板
+                                        scrollEditorToLineUsingOuterScrollPane(editor, effectiveLine, project)
+                                    } else {
+                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动成功")
+                                    }
+                                } catch (verifyEx: Throwable) {
+                                    ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动验证失败: ${verifyEx.message}")
+                                }
+                            }
+
+                            ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动和高亮完成")
                         } catch (ex: Throwable) {
-                            ProjectLogHelper.log(project, "Auto Discover: 文件预览备用滚动失败: ${ex.message}")
-                        } finally {
-                            editorComponent.removeHierarchyListener(hierarchyListener)
+                            ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动失败: ${ex.message}")
+                            // 失败时尝试备用方案
+                            try {
+                                scrollEditorToLineUsingOuterScrollPane(editor, effectiveLine, project)
+                            } catch (fallbackEx: Throwable) {
+                                ProjectLogHelper.log(project, "Auto Discover: 文件预览备用滚动也失败: ${fallbackEx.message}")
+                            }
                         }
                     }
-                }, 5000)
+                }
+
+                // 首先尝试立即执行
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+
+                // 如果立即执行可能失败，再次尝试延迟执行
+                com.intellij.util.Alarm().addRequest({
+                    if (!scrollRunnableHolder.scrollAttempted) {
+                        ProjectLogHelper.log(project, "Auto Discover: 文件预览初始滚动未执行，重试")
+                        scrollRunnableHolder.scrollAttempted = false
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+                    }
+                }, 50)
 
                 // 添加鼠标点击监听器，用于临时高亮点击行
                 editor.contentComponent.addMouseListener(object : java.awt.event.MouseAdapter() {
@@ -891,20 +859,18 @@ object AutoDiscoverUiHelper {
             var editor: com.intellij.openapi.editor.Editor? = null
         }
         val previewPanel = JPanel(BorderLayout())
-        val previewScrollPane = JBScrollPane(previewPanel)
 
         // 分割面板（左右分屏）
         val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         splitPane.leftComponent = JBScrollPane(tree)
-        splitPane.rightComponent = previewScrollPane
+        splitPane.rightComponent = previewPanel
         splitPane.resizeWeight = 0.4
         splitPane.dividerLocation = 400
         splitPane.minimumSize = java.awt.Dimension(800, 600)
         // 设置最小宽度
         val leftScrollPane = splitPane.leftComponent as JBScrollPane
         leftScrollPane.minimumSize = java.awt.Dimension(200, 0)
-        val rightScrollPane = splitPane.rightComponent as JBScrollPane
-        rightScrollPane.minimumSize = java.awt.Dimension(300, 0)
+        previewPanel.minimumSize = java.awt.Dimension(300, 0)
 
         // 控制面板（显示预览开关）
         val controlPanel = JPanel()
@@ -913,7 +879,7 @@ object AutoDiscoverUiHelper {
         showPreviewCheckBox.addItemListener(object : ItemListener {
             override fun itemStateChanged(e: ItemEvent) {
                 val showPreview = e.stateChange == ItemEvent.SELECTED
-                splitPane.bottomComponent = if (showPreview) previewScrollPane else null
+                splitPane.rightComponent = if (showPreview) previewPanel else null
                 splitPane.revalidate()
                 splitPane.repaint()
             }
@@ -941,9 +907,17 @@ object AutoDiscoverUiHelper {
                     val selectedItem = selectedNode.userObject as DisplayItem
                     ProjectLogHelper.log(project, "Auto Discover: 选中节点 item=${selectedItem.callerMethodName}@${selectedItem.filePath}:${selectedItem.line}")
 
-                    // 释放之前的编辑器
+                    // 释放之前的编辑器并彻底清理UI状态
                     releaseEditor(editorHolder.editor)
                     editorHolder.editor = null
+
+                    // 彻底清理预览面板，确保之前的组件完全移除
+                    previewPanel.removeAll()
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
+
+                    // 强制GC清理可能残留的引用
+                    System.gc()
 
                     // 获取目标方法进行预览
                     val element = try {
@@ -956,18 +930,17 @@ object AutoDiscoverUiHelper {
                     if (element != null) {
                         val method = PsiTreeUtil.getParentOfType(element, Method::class.java)
                         if (method != null) {
-                            // 创建新的编辑器预览
-                            val newEditor = createEditorForMethodPreview(project, method, title)
+                            // 创建新的编辑器预览，传递 selectedItem.line 作为目标行
+                            val newEditor = createEditorForMethodPreview(project, method, title, selectedItem.line)
                             editorHolder.editor = newEditor
                             if (newEditor != null) {
                                 previewPanel.removeAll()
                                 previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                 previewPanel.revalidate()
                                 previewPanel.repaint()
-                                // 临时高亮并聚焦到目标行
-                                val methodLine = newEditor.document.getLineNumber(method.textRange.startOffset)
-                                ProjectLogHelper.log(project, "Auto Discover: 预览方法 ${method.name} 在文件 ${method.containingFile?.virtualFile?.path} 第${methodLine + 1}行，准备调用高亮函数")
-                                temporarilyHighlightLine(newEditor, methodLine, project = project)
+                                // 临时高亮并聚焦到调用行
+                                ProjectLogHelper.log(project, "Auto Discover: 预览方法 ${method.name} 在文件 ${method.containingFile?.virtualFile?.path}，高亮调用行=${selectedItem.line + 1}")
+                                temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                             } else {
                                 // 回退到按行打开文件预览
                                 val newEditor = createEditorForFileAtLine(project, selectedItem.filePath, selectedItem.line, title)
@@ -977,7 +950,7 @@ object AutoDiscoverUiHelper {
                                     previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                     previewPanel.revalidate()
                                     previewPanel.repaint()
-                                    // 临时高亮并聚焦到目标行
+                                    // 临时高亮并聚焦到调用行
                                     ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                                     temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                                 } else {
@@ -998,7 +971,8 @@ object AutoDiscoverUiHelper {
                                 previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                 previewPanel.revalidate()
                                 previewPanel.repaint()
-                                // 临时高亮并聚焦到目标行
+                                // 临时高亮并聚焦到调用行
+                                ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                                 temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                             } else {
                                 previewPanel.removeAll()
@@ -1018,7 +992,7 @@ object AutoDiscoverUiHelper {
                             previewPanel.add(newEditor.component, BorderLayout.CENTER)
                             previewPanel.revalidate()
                             previewPanel.repaint()
-                            // 临时高亮并聚焦到目标行
+                            // 临时高亮并聚焦到调用行
                             ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                             temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                         } else {
@@ -1031,9 +1005,17 @@ object AutoDiscoverUiHelper {
                         }
                     }
                 } else {
-                    // 释放之前的编辑器
+                    // 释放之前的编辑器并彻底清理UI状态
                     releaseEditor(editorHolder.editor)
                     editorHolder.editor = null
+
+                    // 彻底清理预览面板，确保之前的组件完全移除
+                    previewPanel.removeAll()
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
+
+                    // 强制GC清理可能残留的引用
+                    System.gc()
 
                     previewPanel.removeAll()
                     val defaultTextArea = JBTextArea("选择一个具体的结果项查看预览")
@@ -1259,12 +1241,11 @@ object AutoDiscoverUiHelper {
             var editor: com.intellij.openapi.editor.Editor? = null
         }
         val previewPanel = JPanel(BorderLayout())
-        val previewScrollPane = JBScrollPane(previewPanel)
 
         // 创建分割面板（左右分屏）
         val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         splitPane.leftComponent = JBScrollPane(tree)
-        splitPane.rightComponent = previewScrollPane
+        splitPane.rightComponent = previewPanel
         splitPane.resizeWeight = 0.4  // 树占40%，预览占60%
         splitPane.dividerLocation = 400
 
@@ -1276,7 +1257,7 @@ object AutoDiscoverUiHelper {
         showPreviewCheckBox.addItemListener(object : ItemListener {
             override fun itemStateChanged(e: ItemEvent) {
                 val showPreview = e.stateChange == ItemEvent.SELECTED
-                splitPane.bottomComponent = if (showPreview) previewScrollPane else null
+                splitPane.rightComponent = if (showPreview) previewPanel else null
                 splitPane.revalidate()
                 splitPane.repaint()
             }
@@ -1297,9 +1278,17 @@ object AutoDiscoverUiHelper {
                 if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
                     val selectedItem = selectedNode.userObject as DisplayItem
 
-                    // 释放之前的编辑器
+                    // 释放之前的编辑器并彻底清理UI状态
                     releaseEditor(editorHolder.editor)
                     editorHolder.editor = null
+
+                    // 彻底清理预览面板，确保之前的组件完全移除
+                    previewPanel.removeAll()
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
+
+                    // 强制GC清理可能残留的引用
+                    System.gc()
 
                     // 获取目标方法进行预览
                     val element = try {
@@ -1312,18 +1301,17 @@ object AutoDiscoverUiHelper {
                     if (element != null) {
                         val method = PsiTreeUtil.getParentOfType(element, Method::class.java)
                         if (method != null) {
-                            // 创建新的编辑器预览
-                            val newEditor = createEditorForMethodPreview(project, method, title)
+                            // 创建新的编辑器预览，传递 selectedItem.line 作为目标行
+                            val newEditor = createEditorForMethodPreview(project, method, title, selectedItem.line)
                             editorHolder.editor = newEditor
                             if (newEditor != null) {
                                 previewPanel.removeAll()
                                 previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                 previewPanel.revalidate()
                                 previewPanel.repaint()
-                                // 临时高亮并聚焦到目标行 (第2个选择监听器)
-                                val methodLine = newEditor.document.getLineNumber(method.textRange.startOffset)
-                                ProjectLogHelper.log(project, "Auto Discover: 预览方法 ${method.name} 在文件 ${method.containingFile?.virtualFile?.path} 第${methodLine + 1}行")
-                                temporarilyHighlightLine(newEditor, methodLine, project = project)
+                                // 临时高亮并聚焦到调用行
+                                ProjectLogHelper.log(project, "Auto Discover: 预览方法 ${method.name} 在文件 ${method.containingFile?.virtualFile?.path}，高亮调用行=${selectedItem.line + 1}")
+                                temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                             } else {
                                 // 回退到按行打开文件预览
                                 val fallbackEditor = createEditorForFileAtLine(project, selectedItem.filePath, selectedItem.line, title)
@@ -1333,7 +1321,7 @@ object AutoDiscoverUiHelper {
                                     previewPanel.add(fallbackEditor.component, BorderLayout.CENTER)
                                     previewPanel.revalidate()
                                     previewPanel.repaint()
-                                    // 临时高亮并聚焦到目标行 (第2个选择监听器)
+                                    // 临时高亮并聚焦到调用行
                                     ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                                     temporarilyHighlightLine(fallbackEditor, selectedItem.line, project = project)
                                 } else {
@@ -1354,6 +1342,9 @@ object AutoDiscoverUiHelper {
                                 previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                 previewPanel.revalidate()
                                 previewPanel.repaint()
+                                // 临时高亮并聚焦到调用行
+                                ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
+                                temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                             } else {
                                 previewPanel.removeAll()
                                 val fallbackTextArea = JBTextArea("无法找到对应的方法")
@@ -1372,7 +1363,7 @@ object AutoDiscoverUiHelper {
                             previewPanel.add(newEditor.component, BorderLayout.CENTER)
                             previewPanel.revalidate()
                             previewPanel.repaint()
-                            // 临时高亮并聚焦到目标行
+                            // 临时高亮并聚焦到调用行
                             ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                             temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                         } else {
@@ -1385,9 +1376,17 @@ object AutoDiscoverUiHelper {
                         }
                     }
                 } else {
-                    // 释放之前的编辑器
+                    // 释放之前的编辑器并彻底清理UI状态
                     releaseEditor(editorHolder.editor)
                     editorHolder.editor = null
+
+                    // 彻底清理预览面板，确保之前的组件完全移除
+                    previewPanel.removeAll()
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
+
+                    // 强制GC清理可能残留的引用
+                    System.gc()
 
                     previewPanel.removeAll()
                     val defaultTextArea = JBTextArea("选择一个具体的结果项查看预览")
@@ -1606,12 +1605,11 @@ object AutoDiscoverUiHelper {
             var editor: Editor? = null
         }
         val previewPanel = JPanel(BorderLayout())
-        val previewScrollPane = JBScrollPane(previewPanel)
 
         // 分割面板（左右分屏）
         val splitPane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         splitPane.leftComponent = JBScrollPane(tree)
-        splitPane.rightComponent = previewScrollPane
+        splitPane.rightComponent = previewPanel
         splitPane.resizeWeight = 0.4
         splitPane.dividerLocation = 400
         splitPane.minimumSize = java.awt.Dimension(800, 600)
@@ -1619,8 +1617,7 @@ object AutoDiscoverUiHelper {
         // 设置最小宽度
         val leftScrollPane = splitPane.leftComponent as JBScrollPane
         leftScrollPane.minimumSize = java.awt.Dimension(200, 0)
-        val rightScrollPane = splitPane.rightComponent as JBScrollPane
-        rightScrollPane.minimumSize = java.awt.Dimension(300, 0)
+        previewPanel.minimumSize = java.awt.Dimension(300, 0)
 
         // 控制面板（显示预览开关）
         val controlPanel = JPanel()
@@ -1629,7 +1626,7 @@ object AutoDiscoverUiHelper {
         showPreviewCheckBox.addItemListener(object : ItemListener {
             override fun itemStateChanged(e: ItemEvent) {
                 val showPreview = e.stateChange == ItemEvent.SELECTED
-                splitPane.bottomComponent = if (showPreview) previewScrollPane else null
+                splitPane.rightComponent = if (showPreview) previewPanel else null
                 splitPane.revalidate()
                 splitPane.repaint()
             }
@@ -1655,9 +1652,17 @@ object AutoDiscoverUiHelper {
                 if (selectedNode != null && !selectedNode.isRoot && selectedNode.userObject is DisplayItem) {
                     val selectedItem = selectedNode.userObject as DisplayItem
 
-                    // 释放之前的编辑器
+                    // 释放之前的编辑器并彻底清理UI状态
                     releaseEditor(editorHolder.editor)
                     editorHolder.editor = null
+
+                    // 彻底清理预览面板，确保之前的组件完全移除
+                    previewPanel.removeAll()
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
+
+                    // 强制GC清理可能残留的引用
+                    System.gc()
 
                     // 获取目标方法进行预览
                     val element = try {
@@ -1672,18 +1677,17 @@ object AutoDiscoverUiHelper {
                     if (element != null) {
                         val method = PsiTreeUtil.getParentOfType(element, Method::class.java)
                         if (method != null) {
-                            // 创建新的编辑器预览
-                            val newEditor = createEditorForMethodPreview(project, method, keyword)
+                            // 创建新的编辑器预览，传递 selectedItem.line 作为目标行
+                            val newEditor = createEditorForMethodPreview(project, method, keyword, selectedItem.line)
                             editorHolder.editor = newEditor
                             if (newEditor != null) {
                                 previewPanel.removeAll()
                                 previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                 previewPanel.revalidate()
                                 previewPanel.repaint()
-                                // 临时高亮并聚焦到目标行 (第3个选择监听器)
-                                val methodLine = newEditor.document.getLineNumber(method.textRange.startOffset)
-                                ProjectLogHelper.log(project, "Auto Discover: 预览方法 ${method.name} 在文件 ${method.containingFile?.virtualFile?.path} 第${methodLine + 1}行")
-                                temporarilyHighlightLine(newEditor, methodLine, project = project)
+                                // 临时高亮并聚焦到调用行
+                                ProjectLogHelper.log(project, "Auto Discover: 预览方法 ${method.name} 在文件 ${method.containingFile?.virtualFile?.path}，高亮调用行=${selectedItem.line + 1}")
+                                temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                             } else {
                                 // 回退到按行打开文件预览
                                 val newEditor = createEditorForFileAtLine(project, selectedItem.filePath, selectedItem.line, keyword)
@@ -1693,7 +1697,7 @@ object AutoDiscoverUiHelper {
                                     previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                     previewPanel.revalidate()
                                     previewPanel.repaint()
-                                    // 临时高亮并聚焦到目标行 (第3个选择监听器)
+                                    // 临时高亮并聚焦到调用行
                                     ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                                     temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                                 } else {
@@ -1714,7 +1718,7 @@ object AutoDiscoverUiHelper {
                                 previewPanel.add(newEditor.component, BorderLayout.CENTER)
                                 previewPanel.revalidate()
                                 previewPanel.repaint()
-                                // 临时高亮并聚焦到目标行
+                                // 临时高亮并聚焦到调用行
                                 ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                                 temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                             } else {
@@ -1735,7 +1739,7 @@ object AutoDiscoverUiHelper {
                             previewPanel.add(newEditor.component, BorderLayout.CENTER)
                             previewPanel.revalidate()
                             previewPanel.repaint()
-                            // 临时高亮并聚焦到目标行
+                            // 临时高亮并聚焦到调用行
                             ProjectLogHelper.log(project, "Auto Discover: 预览文件 ${selectedItem.filePath} 第${selectedItem.line + 1}行")
                             temporarilyHighlightLine(newEditor, selectedItem.line, project = project)
                         } else {
@@ -1748,9 +1752,17 @@ object AutoDiscoverUiHelper {
                         }
                     }
                 } else {
-                    // 释放之前的编辑器
+                    // 释放之前的编辑器并彻底清理UI状态
                     releaseEditor(editorHolder.editor)
                     editorHolder.editor = null
+
+                    // 彻底清理预览面板，确保之前的组件完全移除
+                    previewPanel.removeAll()
+                    previewPanel.revalidate()
+                    previewPanel.repaint()
+
+                    // 强制GC清理可能残留的引用
+                    System.gc()
 
                     previewPanel.removeAll()
                     val defaultTextArea = JBTextArea("选择一个具体的结果项查看预览")
