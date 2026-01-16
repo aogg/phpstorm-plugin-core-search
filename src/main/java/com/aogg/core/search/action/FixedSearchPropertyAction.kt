@@ -34,6 +34,13 @@ class FixedSearchPropertyAction : AnAction("属性", "搜索属性访问", null)
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
+
+        // 检查是否处于 dumb mode（索引重建期间）
+        if (com.intellij.openapi.project.DumbService.isDumb(project)) {
+            notifyInfo(project, "正在重建索引，请稍后再试")
+            return
+        }
+
         val phpClass = resolvePhpClass(e) ?: run {
             notifyError(project, "未找到 PHP 类")
             return
@@ -209,11 +216,16 @@ class FixedSearchPropertyAction : AnAction("属性", "搜索属性访问", null)
             if (visited.contains(fqn)) return
             visited.add(fqn)
 
-            val phpIndex = com.jetbrains.php.PhpIndex.getInstance(cls.project)
-            val subClasses = phpIndex.getAllSubclasses(cls.fqn)
-            for (subClass in subClasses) {
-                result.add(subClass)
-                collectSubClasses(subClass)
+            try {
+                val phpIndex = com.jetbrains.php.PhpIndex.getInstance(cls.project)
+                val subClasses = phpIndex.getAllSubclasses(cls.fqn)
+                for (subClass in subClasses) {
+                    result.add(subClass)
+                    collectSubClasses(subClass)
+                }
+            } catch (ex: com.intellij.openapi.project.IndexNotReadyException) {
+                // 索引未准备好，跳过子类收集
+                ProjectLogHelper.log(cls.project, "FixedSearchPropertyAction: getAllSubClasses 索引未准备好，跳过子类收集 class=${cls.fqn}")
             }
         }
 

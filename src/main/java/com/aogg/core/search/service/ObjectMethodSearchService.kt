@@ -2,6 +2,7 @@ package com.aogg.core.search.service
 
 import com.aogg.core.search.helper.AutoDiscoverUiHelper
 import com.aogg.core.search.helper.ProjectLogHelper
+import com.aogg.core.search.helper.FixedSearchHelper
 import com.aogg.core.search.model.UsageWithTarget
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.progress.ProgressIndicator
@@ -313,8 +314,10 @@ class ObjectMethodSearchService {
                         if (value is NewExpression) {
                             val newClassReference = value.classReference
                             if (newClassReference != null) {
-                                val newClassFqn = resolveClassFqn(newClassReference, project)
-                                if (newClassFqn != null && relatedClassFqns.contains(newClassFqn)) {
+                                // 简化检查：直接比较类名，避免索引访问
+                                val newClassName = newClassReference.text
+                                val targetClassName = targetClass.name ?: ""
+                                if (newClassName == targetClassName || newClassName == targetClassFqn) {
                                     return true
                                 }
                             }
@@ -353,26 +356,37 @@ class ObjectMethodSearchService {
      * 解析类引用的FQN
      */
     private fun resolveClassFqn(classReference: PhpExpression, project: Project): String? {
-        val phpIndex = PhpIndex.getInstance(project)
-        val className = classReference.text
-
-        // 尝试按完整FQN解析
-        val resolvedClassesByFQN = phpIndex.getAnyByFQN(className)
-        for (resolvedClass in resolvedClassesByFQN) {
-            if (resolvedClass is PhpClass) {
-                return resolvedClass.fqn
-            }
+        // 检查是否处于 dumb mode（索引重建期间）
+        if (com.intellij.openapi.project.DumbService.isDumb(project)) {
+            return null
         }
 
-        // 尝试按类名解析
-        val classesByName = phpIndex.getClassesByName(className)
-        for (resolvedClass in classesByName) {
-            if (resolvedClass is PhpClass) {
-                return resolvedClass.fqn
-            }
-        }
+        try {
+            val phpIndex = PhpIndex.getInstance(project)
+            val className = classReference.text
 
-        return null
+            // 尝试按完整FQN解析
+            val resolvedClassesByFQN = phpIndex.getAnyByFQN(className)
+            for (resolvedClass in resolvedClassesByFQN) {
+                if (resolvedClass is PhpClass) {
+                    return resolvedClass.fqn
+                }
+            }
+
+            // 尝试按类名解析
+            val classesByName = phpIndex.getClassesByName(className)
+            for (resolvedClass in classesByName) {
+                if (resolvedClass is PhpClass) {
+                    return resolvedClass.fqn
+                }
+            }
+
+            return null
+        } catch (ex: com.intellij.openapi.project.IndexNotReadyException) {
+            // 索引未准备好，返回null，让调用方处理
+            ProjectLogHelper.log(project, "ObjectMethodSearchService: resolveClassFqn 索引未准备好，跳过解析 classReference=${classReference.text}")
+            return null
+        }
     }
 
     private fun collectObjectMethods(phpClass: PhpClass, result: MutableSet<Pair<Method, String>>, visited: MutableSet<String>) {
@@ -408,10 +422,10 @@ class ObjectMethodSearchService {
     }
 
     private fun showNoResults(project: Project) {
-        com.aogg.core.search.action.FixedSearchUtils.notifyInfo(project, "未找到对象方法调用")
+        FixedSearchHelper.notifyInfo(project, "未找到对象方法调用")
     }
 
     private fun showSearchError(project: Project, errorMessage: String) {
-        com.aogg.core.search.action.FixedSearchUtils.notifyError(project, "搜索对象方法调用失败: $errorMessage")
+        FixedSearchHelper.notifyError(project, "搜索对象方法调用失败: $errorMessage")
     }
 }
