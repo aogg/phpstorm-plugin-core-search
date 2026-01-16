@@ -192,83 +192,84 @@ object AutoDiscoverUiHelper {
                 }
 
                 // 使用更可靠的滚动策略：监听组件显示事件 + 延迟执行
-                val scrollRunnableHolder = object {
-                    var scrollAttempted = false
-                    
-                    fun performScroll() {
-                        if (scrollAttempted) return // 防止重复执行
-                        scrollAttempted = true
+                var scrollAttempted = false
+                val scrollRunnableHolder = arrayOfNulls<Runnable>(1)
+                
+                scrollRunnableHolder[0] = Runnable {
+                    if (scrollAttempted) return@Runnable // 防止重复执行
+                    scrollAttempted = true
 
-                        try {
-                            // 确保编辑器组件已经添加到容器中且可见
-                            val editorComponent = editor.component
-                            if (!editorComponent.isShowing) {
-                                ProjectLogHelper.log(project, "Auto Discover: 编辑器组件尚未显示，延迟滚动")
-                                // 如果组件还没显示，重新调度
+                    try {
+                        // 确保编辑器组件已经添加到容器中且可见
+                        val editorComponent = editor.component
+                        if (!editorComponent.isShowing) {
+                            ProjectLogHelper.log(project, "Auto Discover: 编辑器组件尚未显示，延迟滚动")
+                            // 如果组件还没显示，重新调度
+                            com.intellij.util.Alarm().addRequest({
                                 scrollAttempted = false // 重置标志，允许重试
-                                com.intellij.util.Alarm().addRequest({ performScroll() }, 100)
-                                return
-                            }
+                                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(scrollRunnableHolder[0]!!)
+                            }, 100)
+                            return@Runnable
+                        }
 
-                            // 使用 LogicalPosition 进行滚动（IntelliJ 的 scrollTo 方法接受 LogicalPosition）
-                            val logicalPosition = LogicalPosition(scrollToLine, 0)
+                        // 使用 LogicalPosition 进行滚动（IntelliJ 的 scrollTo 方法接受 LogicalPosition）
+                        val logicalPosition = LogicalPosition(scrollToLine, 0)
 
-                            ProjectLogHelper.log(project, "Auto Discover: 滚动到第${scrollToLine + 1}行 - logicalPosition=$logicalPosition, 组件显示状态=${editorComponent.isShowing}")
+                        ProjectLogHelper.log(project, "Auto Discover: 滚动到第${scrollToLine + 1}行 - logicalPosition=$logicalPosition, 组件显示状态=${editorComponent.isShowing}")
 
-                            // 先设置光标位置
-                            editor.caretModel.moveToLogicalPosition(logicalPosition)
+                        // 先设置光标位置
+                        editor.caretModel.moveToLogicalPosition(logicalPosition)
 
-                            // 滚动到目标位置（使用 CENTER 确保在窗口中央）
-                            editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
+                        // 滚动到目标位置（使用 CENTER 确保在窗口中央）
+                        editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
 
-                            // 高亮搜索关键词
-                            if (searchKeyword.isNotEmpty()) {
-                                highlightSearchKeywordInEditor(editor, searchKeyword)
-                            }
+                        // 高亮搜索关键词
+                        if (searchKeyword.isNotEmpty()) {
+                            highlightSearchKeywordInEditor(editor, searchKeyword)
+                        }
 
-                            // 验证滚动是否成功
-                            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                                try {
-                                    val visibleArea = editor.scrollingModel.visibleArea
-                                    val targetY = editor.logicalPositionToXY(logicalPosition).y
-                                    val isScrollSuccessful = targetY >= visibleArea.y && targetY <= (visibleArea.y + visibleArea.height)
-
-                                    ProjectLogHelper.log(project, "Auto Discover: 滚动验证 - 目标行Y=$targetY, 可见区域=$visibleArea, 滚动成功=$isScrollSuccessful")
-
-                                    if (!isScrollSuccessful) {
-                                        ProjectLogHelper.log(project, "Auto Discover: 滚动失败，尝试使用备用滚动方法")
-                                        // 备用滚动方案：使用外层滚动面板
-                                        scrollEditorToLineUsingOuterScrollPane(editor, scrollToLine, project)
-                                    } else {
-                                        ProjectLogHelper.log(project, "Auto Discover: 滚动成功")
-                                    }
-                                } catch (verifyEx: Throwable) {
-                                    ProjectLogHelper.log(project, "Auto Discover: 滚动验证失败: ${verifyEx.message}")
-                                }
-                            }
-
-                            ProjectLogHelper.log(project, "Auto Discover: 滚动和高亮完成")
-                        } catch (ex: Throwable) {
-                            ProjectLogHelper.log(project, "Auto Discover: 滚动失败: ${ex.message}")
-                            // 失败时尝试备用方案
+                        // 验证滚动是否成功
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
                             try {
-                                scrollEditorToLineUsingOuterScrollPane(editor, scrollToLine, project)
-                            } catch (fallbackEx: Throwable) {
-                                ProjectLogHelper.log(project, "Auto Discover: 备用滚动也失败: ${fallbackEx.message}")
+                                val visibleArea = editor.scrollingModel.visibleArea
+                                val targetY = editor.logicalPositionToXY(logicalPosition).y
+                                val isScrollSuccessful = targetY >= visibleArea.y && targetY <= (visibleArea.y + visibleArea.height)
+
+                                ProjectLogHelper.log(project, "Auto Discover: 滚动验证 - 目标行Y=$targetY, 可见区域=$visibleArea, 滚动成功=$isScrollSuccessful")
+
+                                if (!isScrollSuccessful) {
+                                    ProjectLogHelper.log(project, "Auto Discover: 滚动失败，尝试使用备用滚动方法")
+                                    // 备用滚动方案：使用外层滚动面板
+                                    scrollEditorToLineUsingOuterScrollPane(editor, scrollToLine, project)
+                                } else {
+                                    ProjectLogHelper.log(project, "Auto Discover: 滚动成功")
+                                }
+                            } catch (verifyEx: Throwable) {
+                                ProjectLogHelper.log(project, "Auto Discover: 滚动验证失败: ${verifyEx.message}")
                             }
+                        }
+
+                        ProjectLogHelper.log(project, "Auto Discover: 滚动和高亮完成")
+                    } catch (ex: Throwable) {
+                        ProjectLogHelper.log(project, "Auto Discover: 滚动失败: ${ex.message}")
+                        // 失败时尝试备用方案
+                        try {
+                            scrollEditorToLineUsingOuterScrollPane(editor, scrollToLine, project)
+                        } catch (fallbackEx: Throwable) {
+                            ProjectLogHelper.log(project, "Auto Discover: 备用滚动也失败: ${fallbackEx.message}")
                         }
                     }
                 }
 
                 // 首先尝试立即执行
-                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(scrollRunnableHolder[0]!!)
 
                 // 如果立即执行可能失败，再次尝试延迟执行
                 com.intellij.util.Alarm().addRequest({
-                    if (!scrollRunnableHolder.scrollAttempted) {
+                    if (!scrollAttempted) {
                         ProjectLogHelper.log(project, "Auto Discover: 初始滚动未执行，重试")
-                        scrollRunnableHolder.scrollAttempted = false
-                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+                        scrollAttempted = false
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(scrollRunnableHolder[0]!!)
                     }
                 }, 50)
 
@@ -574,83 +575,84 @@ object AutoDiscoverUiHelper {
                 val effectiveLine = maxOf(0, minOf(line, document.lineCount - 1))
 
                 // 使用更可靠的滚动策略：监听组件显示事件 + 延迟执行
-                val scrollRunnableHolder = object {
-                    var scrollAttempted = false
-                    
-                    fun performScroll() {
-                        if (scrollAttempted) return // 防止重复执行
-                        scrollAttempted = true
+                var scrollAttempted = false
+                val scrollRunnableHolder = arrayOfNulls<Runnable>(1)
+                
+                scrollRunnableHolder[0] = Runnable {
+                    if (scrollAttempted) return@Runnable // 防止重复执行
+                    scrollAttempted = true
 
-                        try {
-                            // 确保编辑器组件已经添加到容器中且可见
-                            val editorComponent = editor.component
-                            if (!editorComponent.isShowing) {
-                                ProjectLogHelper.log(project, "Auto Discover: 文件预览编辑器组件尚未显示，延迟滚动")
-                                // 如果组件还没显示，重新调度
+                    try {
+                        // 确保编辑器组件已经添加到容器中且可见
+                        val editorComponent = editor.component
+                        if (!editorComponent.isShowing) {
+                            ProjectLogHelper.log(project, "Auto Discover: 文件预览编辑器组件尚未显示，延迟滚动")
+                            // 如果组件还没显示，重新调度
+                            com.intellij.util.Alarm().addRequest({
                                 scrollAttempted = false // 重置标志，允许重试
-                                com.intellij.util.Alarm().addRequest({ performScroll() }, 100)
-                                return
-                            }
+                                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(scrollRunnableHolder[0]!!)
+                            }, 100)
+                            return@Runnable
+                        }
 
-                            // 使用 LogicalPosition 进行滚动（IntelliJ 的 scrollTo 方法接受 LogicalPosition）
-                            val logicalPosition = LogicalPosition(effectiveLine, 0)
+                        // 使用 LogicalPosition 进行滚动（IntelliJ 的 scrollTo 方法接受 LogicalPosition）
+                        val logicalPosition = LogicalPosition(effectiveLine, 0)
 
-                            ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动到第${effectiveLine + 1}行 - logicalPosition=$logicalPosition, 组件显示状态=${editorComponent.isShowing}")
+                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动到第${effectiveLine + 1}行 - logicalPosition=$logicalPosition, 组件显示状态=${editorComponent.isShowing}")
 
-                            // 先设置光标位置
-                            editor.caretModel.moveToLogicalPosition(logicalPosition)
+                        // 先设置光标位置
+                        editor.caretModel.moveToLogicalPosition(logicalPosition)
 
-                            // 滚动到目标位置（使用 CENTER 确保在窗口中央）
-                            editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
+                        // 滚动到目标位置（使用 CENTER 确保在窗口中央）
+                        editor.scrollingModel.scrollTo(logicalPosition, ScrollType.CENTER)
 
-                            // 高亮搜索关键词
-                            if (searchKeyword.isNotEmpty()) {
-                                highlightSearchKeywordInEditor(editor, searchKeyword)
-                            }
+                        // 高亮搜索关键词
+                        if (searchKeyword.isNotEmpty()) {
+                            highlightSearchKeywordInEditor(editor, searchKeyword)
+                        }
 
-                            // 验证滚动是否成功
-                            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
-                                try {
-                                    val visibleArea = editor.scrollingModel.visibleArea
-                                    val targetY = editor.logicalPositionToXY(logicalPosition).y
-                                    val isScrollSuccessful = targetY >= visibleArea.y && targetY <= (visibleArea.y + visibleArea.height)
-
-                                    ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动验证 - 目标行Y=$targetY, 可见区域=$visibleArea, 滚动成功=$isScrollSuccessful")
-
-                                    if (!isScrollSuccessful) {
-                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动失败，尝试使用备用滚动方法")
-                                        // 备用滚动方案：使用外层滚动面板
-                                        scrollEditorToLineUsingOuterScrollPane(editor, effectiveLine, project)
-                                    } else {
-                                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动成功")
-                                    }
-                                } catch (verifyEx: Throwable) {
-                                    ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动验证失败: ${verifyEx.message}")
-                                }
-                            }
-
-                            ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动和高亮完成")
-                        } catch (ex: Throwable) {
-                            ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动失败: ${ex.message}")
-                            // 失败时尝试备用方案
+                        // 验证滚动是否成功
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
                             try {
-                                scrollEditorToLineUsingOuterScrollPane(editor, effectiveLine, project)
-                            } catch (fallbackEx: Throwable) {
-                                ProjectLogHelper.log(project, "Auto Discover: 文件预览备用滚动也失败: ${fallbackEx.message}")
+                                val visibleArea = editor.scrollingModel.visibleArea
+                                val targetY = editor.logicalPositionToXY(logicalPosition).y
+                                val isScrollSuccessful = targetY >= visibleArea.y && targetY <= (visibleArea.y + visibleArea.height)
+
+                                ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动验证 - 目标行Y=$targetY, 可见区域=$visibleArea, 滚动成功=$isScrollSuccessful")
+
+                                if (!isScrollSuccessful) {
+                                    ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动失败，尝试使用备用滚动方法")
+                                    // 备用滚动方案：使用外层滚动面板
+                                    scrollEditorToLineUsingOuterScrollPane(editor, effectiveLine, project)
+                                } else {
+                                    ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动成功")
+                                }
+                            } catch (verifyEx: Throwable) {
+                                ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动验证失败: ${verifyEx.message}")
                             }
+                        }
+
+                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动和高亮完成")
+                    } catch (ex: Throwable) {
+                        ProjectLogHelper.log(project, "Auto Discover: 文件预览滚动失败: ${ex.message}")
+                        // 失败时尝试备用方案
+                        try {
+                            scrollEditorToLineUsingOuterScrollPane(editor, effectiveLine, project)
+                        } catch (fallbackEx: Throwable) {
+                            ProjectLogHelper.log(project, "Auto Discover: 文件预览备用滚动也失败: ${fallbackEx.message}")
                         }
                     }
                 }
 
                 // 首先尝试立即执行
-                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(scrollRunnableHolder[0]!!)
 
                 // 如果立即执行可能失败，再次尝试延迟执行
                 com.intellij.util.Alarm().addRequest({
-                    if (!scrollRunnableHolder.scrollAttempted) {
+                    if (!scrollAttempted) {
                         ProjectLogHelper.log(project, "Auto Discover: 文件预览初始滚动未执行，重试")
-                        scrollRunnableHolder.scrollAttempted = false
-                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { scrollRunnableHolder.performScroll() }
+                        scrollAttempted = false
+                        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(scrollRunnableHolder[0]!!)
                     }
                 }, 50)
 

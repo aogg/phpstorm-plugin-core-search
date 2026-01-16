@@ -21,6 +21,7 @@ class FixedSearchActionGroup : ActionGroup("固定搜索", "固定类型的搜�
 
         return arrayOf(
             FixedSearchConstructorAction(),
+            FixedSearchObjectMethodAction(),
             FixedSearchStaticAction(),
             FixedSearchConstantAction(),
             FixedSearchPropertyAction()

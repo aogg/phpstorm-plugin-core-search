@@ -1,0 +1,382 @@
+package com.aogg.core.search.action
+
+import com.aogg.core.search.helper.AutoDiscoverUiHelper
+import com.aogg.core.search.helper.ProjectLogHelper
+import com.aogg.core.search.model.UsageWithTarget
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
+import com.intellij.openapi.project.Project
+import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiManager
+import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.usages.UsageInfo2UsageAdapter
+import com.intellij.usages.UsageViewPresentation
+import com.intellij.usages.UsageViewManager
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationType
+import com.intellij.notification.Notifications
+import com.jetbrains.php.lang.psi.elements.Method
+import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.intellij.psi.search.searches.ReferencesSearch as RefSearch
+import com.intellij.usageView.UsageInfo
+
+/**
+ * 固定搜索 - 对象方法调用：搜索当前类的对象方法调用（包含父类方法）
+ */
+class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对象方法调用", null) {
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val phpClass = FixedSearchUtils.resolvePhpClass(e) ?: run {
+            FixedSearchUtils.notifyError(project, "未找到 PHP 类")
+            return
+        }
+
+        ProjectLogHelper.log(project, "固定搜索-对象方法调用: 开始搜索 class=${phpClass.fqn}")
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "固定搜索：对象方法调用", true) {
+            override fun run(indicator: ProgressIndicator) {
+                ApplicationManager.getApplication().runReadAction {
+                    performObjectMethodSearch(project, indicator, phpClass)
+                }
+            }
+        })
+    }
+
+    private fun performObjectMethodSearch(project: Project, indicator: ProgressIndicator, targetClass: PhpClass) {
+        indicator.text = "搜索对象方法调用..."
+        indicator.isIndeterminate = false // 使用确定进度
+
+        try {
+            val objectMethods = mutableSetOf<Pair<Method, String>>()
+            collectObjectMethods(targetClass, objectMethods, mutableSetOf())
+
+            ProjectLogHelper.log(project, "固定搜索-对象方法调用: 收集到 ${objectMethods.size} 个对象方法")
+
+            val searchScope = GlobalSearchScope.projectScope(project)
+            val cumulativeUsages = mutableListOf<UsageWithTarget>() // 累积所有结果，用于最终显示
+            val batchSize = 3 // 每批处理3个方法，减少批次大小以提高响应性
+
+            // 分批搜索，每批立即处理和显示
+            val methodList = objectMethods.toList()
+            for (i in methodList.indices step batchSize) {
+                if (indicator.isCanceled) break
+
+                val batchEnd = minOf(i + batchSize, methodList.size)
+                val batch = methodList.subList(i, batchEnd)
+
+                // 更新进度
+                indicator.fraction = i.toDouble() / methodList.size.toDouble()
+                indicator.text = "搜索对象方法调用... (${i}/${methodList.size})"
+
+                // ⭐ 立即处理：搜索当前批次
+                val currentPage = (i / batchSize) + 1
+                val totalPages = (methodList.size + batchSize - 1) / batchSize // 向上取整计算总页数
+                val totalItems = methodList.size
+                val currentItemIndex = i + batch.size // 当前处理的项数
+
+                processBatch(batch, searchScope, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
+
+                // 添加小延迟，避免UI更新过于频繁
+                Thread.sleep(50)
+            }
+
+            // 搜索完成后的最终处理
+            indicator.fraction = 1.0
+            indicator.text = "搜索完成"
+
+            ApplicationManager.getApplication().invokeLater {
+                if (cumulativeUsages.isEmpty()) {
+                    FixedSearchUtils.notifyInfo(project, "未找到对象方法调用")
+                }
+            }
+
+            ProjectLogHelper.log(project, "固定搜索-对象方法调用: 搜索完成，找到 ${cumulativeUsages.size} 个对象方法调用")
+
+        } catch (ex: Throwable) {
+            ProjectLogHelper.log(project, "固定搜索-对象方法调用: 搜索异常 ${ex.message}")
+            ApplicationManager.getApplication().invokeLater {
+                FixedSearchUtils.notifyError(project, "搜索对象方法调用失败: ${ex.message}")
+            }
+        }
+    }
+
+    /**
+     * 处理单个批次：搜索 + 过滤，直接累积到结果中
+     */
+    private fun processBatch(
+        batch: List<Pair<Method, String>>,
+        searchScope: GlobalSearchScope,
+        targetClass: PhpClass,
+        project: Project,
+        cumulativeUsages: MutableList<UsageWithTarget>,
+        currentPage: Int,
+        totalPages: Int,
+        totalItems: Int,
+        currentItemIndex: Int
+    ) {
+        // 1. 搜索这一批方法的所有引用
+        val batchUsages = mutableListOf<UsageWithTarget>()
+        for ((method, className) in batch) {
+            val refs = RefSearch.search(method, searchScope, false).findAll()
+            for (ref in refs) {
+                val element = ref.element
+                val methodRef = PsiTreeUtil.getParentOfType(
+                    element,
+                    com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                    false
+                )
+                if (methodRef != null) {
+                    val range = ref.rangeInElement
+                    batchUsages.add(UsageWithTarget(
+                        UsageInfo(element, range.startOffset, range.endOffset, true),
+                        "对象调用 — ${method.name}()（定义: $className）"
+                    ))
+                }
+            }
+        }
+
+        // 2. 立即过滤这一批的结果，直接累积到最终结果中
+        filterRelatedObjectUsages(batchUsages, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
+    }
+
+    /**
+     * 增量显示搜索结果
+     */
+    private fun showIncrementalResults(project: Project, currentUsages: List<UsageWithTarget>) {
+        ApplicationManager.getApplication().invokeLater {
+            try {
+                AutoDiscoverUiHelper.showAutoDiscoverToolWindow(project, currentUsages, "固定搜索-对象方法调用")
+            } catch (ex: Throwable) {
+                // 如果工具窗口失败，使用弹窗显示
+                try {
+                    val fallbackUsages = currentUsages.map { UsageInfo2UsageAdapter(it.usageInfo) as com.intellij.usages.Usage }
+                    AutoDiscoverUiHelper.showCustomUsagesPopup(project, fallbackUsages, "固定搜索-对象方法调用")
+                } catch (exPopup: Throwable) {
+                    // 最终回退到标准用法视图
+                    showUsagesInStandardView(project, currentUsages)
+                }
+            }
+        }
+    }
+
+    private fun filterRelatedObjectUsages(
+        usagesWithTarget: List<UsageWithTarget>,
+        targetClass: PhpClass,
+        project: Project,
+        cumulativeUsages: MutableList<UsageWithTarget>,
+        currentPage: Int,
+        totalPages: Int,
+        totalItems: Int,
+        currentItemIndex: Int
+    ) {
+        var lastDisplayTime = System.currentTimeMillis()
+        var hasNewResultsInBatch = false
+
+        for (uwt in usagesWithTarget) {
+            val usage = uwt.usageInfo
+            val element = usage.element ?: continue
+
+            // 查找包含此元素的方法引用
+            val methodRef = PsiTreeUtil.getParentOfType(
+                element,
+                com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                /* strict = */ false
+            ) ?: continue
+
+            // 检查是否为真正的对象调用：classReference存在且以$开头（变量）
+            val classReference = methodRef.classReference
+            if (classReference != null) {
+                val className = classReference.text
+                if (className.isNotEmpty() && className.startsWith("$")) {
+                    // 二次过滤：检查调用对象是否是当前类实例
+                    if (isTargetClassInstance(classReference, targetClass)) {
+                        // 是当前类的对象调用，保留
+                        cumulativeUsages.add(uwt)
+                        hasNewResultsInBatch = true
+
+                        ProjectLogHelper.log(
+                            element.project,
+                            "固定搜索-对象方法调用: filterRelatedObjectUsages 保留对象调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                        )
+
+                        // 检查时间间隔，如果超过2秒立即显示
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - lastDisplayTime > 2000) { // 2秒 = 2000毫秒
+                            showIncrementalResults(project, cumulativeUsages.toList())
+                            lastDisplayTime = currentTime
+                            hasNewResultsInBatch = false // 重置标记，因为已经显示了
+                        }
+                    } else {
+                        // 调用对象不是当前类实例，跳过
+                        ProjectLogHelper.log(
+                            element.project,
+                            "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过非目标类实例调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                        )
+                    }
+                } else {
+                    // 静态调用（通过类名），跳过
+                    ProjectLogHelper.log(
+                        element.project,
+                        "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过静态调用 method=${uwt.targetMethodName}, classReference=$className [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                    )
+                }
+            } else {
+                // 没有classReference，可能不是方法调用，跳过
+                ProjectLogHelper.log(
+                    element.project,
+                    "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过无classReference的调用 method=${uwt.targetMethodName} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                )
+            }
+        }
+
+        // 如果这一批有新结果但还没显示（时间间隔不足2秒），在这里显示
+        if (hasNewResultsInBatch) {
+            showIncrementalResults(project, cumulativeUsages.toList())
+        }
+    }
+
+    /**
+     * 检查变量是否是目标类的实例
+     */
+    private fun isTargetClassInstance(classReference: com.jetbrains.php.lang.psi.elements.PhpExpression, targetClass: PhpClass): Boolean {
+        val project = targetClass.project
+        val targetClassFqn = targetClass.fqn ?: return false
+
+        // 获取目标类及其子类的FQN集合，用于快速校验
+        val relatedClassFqns = mutableSetOf<String>()
+        relatedClassFqns.add(targetClassFqn)
+
+        // 由于类型推断复杂，这里采用简化策略：
+        // 1. 检查变量名是否暗示是目标类（简单启发式）
+        // 2. 检查附近是否有相关的new表达式或赋值
+
+        val variableName = classReference.text
+        if (variableName.startsWith("$")) {
+            val varName = variableName.substring(1)
+
+            // 启发式检查：变量名是否包含类名的简化形式
+            val className = targetClass.name ?: ""
+            if (varName.contains(className.lowercase()) ||
+                className.lowercase().contains(varName) ||
+                varName == className.lowercase()) {
+                return true
+            }
+
+            // 检查当前作用域内是否有相关的new表达式或赋值
+            val containingMethod = PsiTreeUtil.getParentOfType(classReference, com.jetbrains.php.lang.psi.elements.Method::class.java)
+            val containingFunction = PsiTreeUtil.getParentOfType(classReference, com.jetbrains.php.lang.psi.elements.Function::class.java)
+
+            // 在方法或函数内查找变量声明
+            val searchScope = containingMethod ?: containingFunction
+            if (searchScope != null) {
+                // 查找变量赋值，如 $var = new TargetClass()
+                val assignments = PsiTreeUtil.findChildrenOfType(searchScope, com.jetbrains.php.lang.psi.elements.AssignmentExpression::class.java)
+                for (assignment in assignments) {
+                    val variable = assignment.variable
+                    if (variable?.text == variableName) {
+                        // 检查赋值右边的值
+                        val value = assignment.value
+                        if (value is com.jetbrains.php.lang.psi.elements.NewExpression) {
+                            val newClassReference = value.classReference
+                            if (newClassReference != null) {
+                                val newClassFqn = resolveClassFqn(newClassReference, project)
+                                if (newClassFqn != null && relatedClassFqns.contains(newClassFqn)) {
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 查找参数声明，如 function test(TargetClass $var)
+                if (containingMethod != null) {
+                    val parameters = containingMethod.parameters
+                    for (parameter in parameters) {
+                        val parameterName = "$" + parameter.name
+                        if (parameterName == variableName) {
+                            val parameterType = parameter.declaredType
+                            if (parameterType != null) {
+                                // 对于 PhpType，需要使用不同的方式获取类型信息
+                                val typeString = parameterType.toString()
+                                if (relatedClassFqns.any { typeString.contains(it) }) {
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 检查全局作用域或其他常见模式
+            // 这里可以添加更多启发式规则
+        }
+
+        // 如果无法确定，默认不匹配（宁可错过，不可误报）
+        return false
+    }
+
+    /**
+     * 解析类引用的FQN
+     */
+    private fun resolveClassFqn(classReference: com.jetbrains.php.lang.psi.elements.PhpExpression, project: Project): String? {
+        val phpIndex = com.jetbrains.php.PhpIndex.getInstance(project)
+        val className = classReference.text
+
+        // 尝试按完整FQN解析
+        val resolvedClassesByFQN = phpIndex.getAnyByFQN(className)
+        for (resolvedClass in resolvedClassesByFQN) {
+            if (resolvedClass is PhpClass) {
+                return resolvedClass.fqn
+            }
+        }
+
+        // 尝试按类名解析
+        val classesByName = phpIndex.getClassesByName(className)
+        for (resolvedClass in classesByName) {
+            if (resolvedClass is PhpClass) {
+                return resolvedClass.fqn
+            }
+        }
+
+        return null
+    }
+
+    private fun collectObjectMethods(phpClass: PhpClass, result: MutableSet<Pair<Method, String>>, visited: MutableSet<String>) {
+        val fqn = phpClass.fqn ?: return
+        if (visited.contains(fqn)) return
+        visited.add(fqn)
+
+        // 添加当前类的非静态方法
+        val currentMethods = phpClass.methods.filter { !it.modifier.isStatic && !it.access.isPrivate }
+        for (method in currentMethods) {
+            result.add(Pair(method, phpClass.name ?: "当前类"))
+        }
+
+        // 递归收集父类的非静态方法
+        val superClass = phpClass.superClass
+        if (superClass != null) {
+            collectObjectMethods(superClass, result, visited)
+        }
+    }
+
+    private fun showUsagesInStandardView(project: Project, usages: List<UsageWithTarget>) {
+        val usageTargets = emptyArray<com.intellij.usages.UsageTarget>()
+        val presentation = UsageViewPresentation()
+        presentation.tabName = "固定搜索-对象方法调用"
+        presentation.tabText = "固定搜索-对象方法调用"
+        presentation.scopeText = "项目范围"
+        val usageInfosForView = usages.map { it.usageInfo }
+        UsageViewManager.getInstance(project).showUsages(
+            usageTargets,
+            usageInfosForView.map { UsageInfo2UsageAdapter(it) }.toTypedArray(),
+            presentation
+        )
+    }
+
+}
