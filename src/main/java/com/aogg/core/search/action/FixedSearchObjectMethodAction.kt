@@ -41,9 +41,7 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
         ProjectLogHelper.log(project, "固定搜索-对象方法调用: 开始搜索 class=${phpClass.fqn}")
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "固定搜索：对象方法调用", true) {
             override fun run(indicator: ProgressIndicator) {
-                ApplicationManager.getApplication().runReadAction {
-                    performObjectMethodSearch(project, indicator, phpClass)
-                }
+                performObjectMethodSearch(project, indicator, phpClass)
             }
         })
     }
@@ -53,8 +51,12 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
         indicator.isIndeterminate = false // 使用确定进度
 
         try {
-            val objectMethods = mutableSetOf<Pair<Method, String>>()
-            collectObjectMethods(targetClass, objectMethods, mutableSetOf())
+            // 1. 收集对象方法（需要PSI数据）
+            val objectMethods = ApplicationManager.getApplication().runReadAction<LinkedHashSet<Pair<Method, String>>> {
+                val methods = LinkedHashSet<Pair<Method, String>>()
+                collectObjectMethods(targetClass, methods, HashSet())
+                methods
+            }
 
             ProjectLogHelper.log(project, "固定搜索-对象方法调用: 收集到 ${objectMethods.size} 个对象方法")
 
@@ -74,16 +76,19 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
                 indicator.fraction = i.toDouble() / methodList.size.toDouble()
                 indicator.text = "搜索对象方法调用... (${i}/${methodList.size})"
 
-                // ⭐ 立即处理：搜索当前批次
+                // ⭐ 立即处理：搜索当前批次（需要PSI数据）
                 val currentPage = (i / batchSize) + 1
                 val totalPages = (methodList.size + batchSize - 1) / batchSize // 向上取整计算总页数
                 val totalItems = methodList.size
                 val currentItemIndex = i + batch.size // 当前处理的项数
 
-                processBatch(batch, searchScope, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
+                ApplicationManager.getApplication().runReadAction {
+                    processBatch(batch, searchScope, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
+                }
 
-                // 添加小延迟，避免UI更新过于频繁
-                Thread.sleep(50)
+                // 在批次间让出控制权，让UI线程有机会响应
+                ProgressManager.checkCanceled()
+                Thread.sleep(10) // 短暂yield，让UI有机会响应
             }
 
             // 搜索完成后的最终处理
@@ -108,6 +113,7 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
 
     /**
      * 处理单个批次：搜索 + 过滤，直接累积到结果中
+     * 优化：实现引用级分批，避免单个方法引用过多导致内存爆炸
      */
     private fun processBatch(
         batch: List<Pair<Method, String>>,
@@ -120,29 +126,68 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
         totalItems: Int,
         currentItemIndex: Int
     ) {
-        // 1. 搜索这一批方法的所有引用
-        val batchUsages = mutableListOf<UsageWithTarget>()
+        // 对每个方法进行引用级分批处理
         for ((method, className) in batch) {
-            val refs = RefSearch.search(method, searchScope, false).findAll()
-            for (ref in refs) {
-                val element = ref.element
-                val methodRef = PsiTreeUtil.getParentOfType(
-                    element,
-                    com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
-                    false
-                )
-                if (methodRef != null) {
-                    val range = ref.rangeInElement
-                    batchUsages.add(UsageWithTarget(
-                        UsageInfo(element, range.startOffset, range.endOffset, true),
-                        "对象调用 — ${method.name}()（定义: $className）"
-                    ))
+            processMethodReferences(method, className, searchScope, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
+        }
+    }
+
+    /**
+     * 对单个方法的引用进行分批处理，避免内存爆炸
+     * 优化：引用级批次也使用runReadAction，避免PSI访问阻塞UI
+     */
+    private fun processMethodReferences(
+        method: Method,
+        className: String,
+        searchScope: GlobalSearchScope,
+        targetClass: PhpClass,
+        project: Project,
+        cumulativeUsages: MutableList<UsageWithTarget>,
+        currentPage: Int,
+        totalPages: Int,
+        totalItems: Int,
+        currentItemIndex: Int
+    ) {
+        val methodRefsIterator = RefSearch.search(method, searchScope, false).iterator()
+        val referenceBatchSize = 20 // 每次处理20个引用，避免内存占用过高
+
+        // 使用迭代器分批获取引用，避免一次性加载所有引用
+        while (methodRefsIterator.hasNext()) {
+            // ⭐ 每个引用批次都独立使用runReadAction，避免长时间阻塞UI
+            ApplicationManager.getApplication().runReadAction {
+                val referenceBatch = mutableListOf<UsageWithTarget>()
+
+                // 收集一批引用
+                for (i in 0 until referenceBatchSize) {
+                    if (!methodRefsIterator.hasNext()) break
+
+                    val ref = methodRefsIterator.next()
+                    val element = ref.element
+                    val methodRef = PsiTreeUtil.getParentOfType(
+                        element,
+                        com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                        false
+                    )
+
+                    if (methodRef != null) {
+                        val range = ref.rangeInElement
+                        referenceBatch.add(UsageWithTarget(
+                            UsageInfo(element, range.startOffset, range.endOffset, true),
+                            "对象调用 — ${method.name}()（定义: $className）"
+                        ))
+                    }
+                }
+
+                // 如果收集到了引用，立即进行过滤
+                if (referenceBatch.isNotEmpty()) {
+                    filterRelatedObjectUsages(referenceBatch, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
                 }
             }
-        }
 
-        // 2. 立即过滤这一批的结果，直接累积到最终结果中
-        filterRelatedObjectUsages(batchUsages, targetClass, project, cumulativeUsages, currentPage, totalPages, totalItems, currentItemIndex)
+            // ⭐ 在引用批次间yield，让UI有更多响应机会
+            ProgressManager.checkCanceled()
+            Thread.sleep(1) // 更短的yield时间，让UI更流畅
+        }
     }
 
     /**
@@ -205,9 +250,9 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
                             "固定搜索-对象方法调用: filterRelatedObjectUsages 保留对象调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
                         )
 
-                        // 检查时间间隔，如果超过2秒立即显示
+                        // 检查时间间隔或结果数量，如果超过5秒或累积了10个结果立即显示
                         val currentTime = System.currentTimeMillis()
-                        if (currentTime - lastDisplayTime > 2000) { // 2秒 = 2000毫秒
+                        if (currentTime - lastDisplayTime > 5000 || cumulativeUsages.size % 10 == 0) { // 5秒或每10个结果
                             showIncrementalResults(project, cumulativeUsages.toList())
                             lastDisplayTime = currentTime
                             hasNewResultsInBatch = false // 重置标记，因为已经显示了

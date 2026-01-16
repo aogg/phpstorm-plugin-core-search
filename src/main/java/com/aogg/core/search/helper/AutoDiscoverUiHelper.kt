@@ -1063,48 +1063,117 @@ object AutoDiscoverUiHelper {
             }
         }
 
-        // 设置工具窗口内容
-        val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
-        // 为避免重复标题，给每个tab添加序号后缀
-        tabCounter++
-        val uniqueTitle = "$title #$tabCounter"
-        val content = contentFactory.createContent(mainPanel, uniqueTitle, true)
+        // 检查是否已存在相同标题的tab，如果存在则重用，否则创建新的
+        val existingContent = findExistingAutoDiscoverTab(toolWindow, title)
+        val currentTabCount = toolWindow.contentManager.contents.size
 
-        // 添加内容监听器，在内容移除时释放编辑器资源
-        content.addPropertyChangeListener { evt ->
-            if ("disposed" == evt.propertyName) {
-                releaseEditor(editorHolder.editor)
-            }
-        }
+        if (existingContent != null) {
+            // 重用现有tab，更新内容
+            updateExistingAutoDiscoverTabContent(existingContent, mainPanel, editorHolder)
+            toolWindow.contentManager.setSelectedContent(existingContent)
+            ProjectLogHelper.log(project, "Auto Discover: 重用现有tab title=$title items=${items.size} 当前tab总数=$currentTabCount")
+        } else {
+            // 创建新tab
+            val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
+            tabCounter++
+            val uniqueTitle = "$title #$tabCounter"
+            val content = contentFactory.createContent(mainPanel, uniqueTitle, true)
 
-        // 确保新增tab而不是替换现有内容
-        // 先检查是否已存在相同标题的内容，如果有则使用不同的标题
-        val existingTitles = toolWindow.contentManager.contents.map { it.displayName }
-        var finalTitle = uniqueTitle
-        var counter = 1
-        while (existingTitles.contains(finalTitle)) {
-            finalTitle = "$uniqueTitle (${counter++})"
-        }
-
-        // 如果标题被修改了，重新创建content
-        val finalContent = if (finalTitle != uniqueTitle) {
-            contentFactory.createContent(mainPanel, finalTitle, true).apply {
-                addPropertyChangeListener { evt ->
-                    if ("disposed" == evt.propertyName) {
-                        releaseEditor(editorHolder.editor)
-                    }
+            // 添加内容监听器，在内容移除时释放编辑器资源
+            content.addPropertyChangeListener { evt ->
+                if ("disposed" == evt.propertyName) {
+                    releaseEditor(editorHolder.editor)
                 }
             }
-        } else content
 
-        toolWindow.contentManager.addContent(finalContent)
+            toolWindow.contentManager.addContent(content)
+            toolWindow.contentManager.setSelectedContent(content)
 
-        // 激活新添加的tab
-        toolWindow.contentManager.setSelectedContent(finalContent)
+            // 记录详细的tab创建日志
+            val newTabCount = toolWindow.contentManager.contents.size
+            ProjectLogHelper.log(project, "Auto Discover: 创建新tab title=$title items=${items.size} tab标题='$uniqueTitle' 当前tab总数=$newTabCount (之前=$currentTabCount)")
+
+            // 如果tab数量增加，记录警告日志
+            if (newTabCount > currentTabCount) {
+                ProjectLogHelper.log(project, "⚠️ Auto Discover: tab数量增加! title=$title 新增tab标题='$uniqueTitle' 当前tab总数=$newTabCount")
+            }
+        }
 
         // 显示工具窗口
         toolWindow.show(null)
         ProjectLogHelper.log(project, "Auto Discover: 工具窗口已显示 title=$title items=${items.size}")
+    }
+
+    /**
+     * 查找已存在的自动发现tab（按标题匹配）
+     * @param toolWindow 工具窗口实例
+     * @param title 搜索标题
+     * @return 如果找到匹配的tab则返回Content，否则返回null
+     */
+    private fun findExistingAutoDiscoverTab(toolWindow: com.intellij.openapi.wm.ToolWindow, title: String): com.intellij.ui.content.Content? {
+        val contents = toolWindow.contentManager.contents
+
+        // 记录当前所有tab的标题，用于调试
+        val allTabTitles = contents.map { it.displayName }
+        ProjectLogHelper.log(null, "Auto Discover: 查找现有tab title=$title 当前所有tab标题=${allTabTitles.joinToString(", ")}")
+
+        for (content in contents) {
+            val displayName = content.displayName
+            // 检查是否是自动发现tab且标题匹配
+            if (displayName.startsWith(title) && displayName.contains("#")) {
+                ProjectLogHelper.log(null, "Auto Discover: 找到匹配的现有tab title=$title tab标题='$displayName'")
+                return content
+            }
+        }
+
+        ProjectLogHelper.log(null, "Auto Discover: 未找到匹配的现有tab title=$title")
+        return null
+    }
+
+    /**
+     * 跨异步更新现有自动发现tab的内容
+     * @param existingContent 现有的Content
+     * @param newMainPanel 新的主面板
+     * @param editorHolder 新的编辑器持有者对象（用于后续操作）
+     */
+    private fun updateExistingAutoDiscoverTabContent(
+        existingContent: com.intellij.ui.content.Content,
+        newMainPanel: JPanel,
+        editorHolder: Any
+    ) {
+        try {
+            // 在UI线程中执行更新操作，确保线程安全
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                try {
+                    // 1. 释放现有tab中的编辑器资源
+                    releaseExistingTabResources(existingContent)
+
+                    // 2. 短暂延迟，确保资源释放完成
+                    com.intellij.util.Alarm().addRequest({
+                        try {
+                            // 3. 更新tab内容
+                            existingContent.component = newMainPanel
+
+                            // 4. 强制刷新UI
+                            existingContent.component.revalidate()
+                            existingContent.component.repaint()
+
+                            // 5. 触发初始选择，确保预览正确显示
+                            triggerInitialSelection(newMainPanel)
+
+                            ProjectLogHelper.log(null, "Auto Discover: 成功更新现有tab内容")
+                        } catch (updateEx: Throwable) {
+                            ProjectLogHelper.log(null, "Auto Discover: 更新tab内容时出错: ${updateEx.message}")
+                        }
+                    }, 100) // 100ms延迟，确保资源释放完成
+
+                } catch (ex: Throwable) {
+                    ProjectLogHelper.log(null, "Auto Discover: 准备更新tab内容时出错: ${ex.message}")
+                }
+            }
+        } catch (ex: Throwable) {
+            ProjectLogHelper.log(null, "Auto Discover: 更新现有tab内容失败: ${ex.message}")
+        }
     }
 
     /**
@@ -1531,13 +1600,13 @@ object AutoDiscoverUiHelper {
         val rootNode = DefaultMutableTreeNode("核心搜索结果")
         for ((targetName, methodItems) in groupedItems) {
             val targetNode = DefaultMutableTreeNode("$targetName (${methodItems.size})")
-            
+
             // 第二层：按调用方法名分组
             val callerGroups = methodItems.groupBy { it.callerMethodName.ifEmpty { "其他" } }
-            
+
             for ((callerName, callerItems) in callerGroups) {
                 val callerNode = DefaultMutableTreeNode("$callerName (${callerItems.size})")
-                
+
                 for (item in callerItems) {
                     val relPath = try {
                         val base = project.basePath
@@ -1814,48 +1883,195 @@ object AutoDiscoverUiHelper {
             }
         }
 
-        // 设置工具窗口内容
-        val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
-        // 为避免重复标题，给每个tab添加序号后缀
-        tabCounter++
-        val uniqueTitle = "核心搜索: @$keyword #$tabCounter"
-        val content = contentFactory.createContent(mainPanel, uniqueTitle, true)
+        // 检查是否已存在相同关键词的tab，如果存在则重用，否则创建新的
+        val existingContent = findExistingCoreSearchTab(toolWindow, keyword)
+        val currentTabCount = toolWindow.contentManager.contents.size
 
-        // 添加内容监听器，在内容移除时释放编辑器资源
-        content.addPropertyChangeListener { evt ->
-            if ("disposed" == evt.propertyName) {
-                releaseEditor(editorHolder.editor)
-            }
-        }
+        if (existingContent != null) {
+            // 重用现有tab，更新内容
+            updateExistingTabContent(existingContent, mainPanel, editorHolder)
+            toolWindow.contentManager.setSelectedContent(existingContent)
+            ProjectLogHelper.log(project, "核心搜索: 重用现有tab keyword=$keyword items=${items.size} 当前tab总数=$currentTabCount")
+        } else {
+            // 创建新tab
+            val contentFactory = com.intellij.ui.content.ContentFactory.SERVICE.getInstance()
+            val uniqueTitle = "核心搜索: @$keyword"
+            val content = contentFactory.createContent(mainPanel, uniqueTitle, true)
 
-        // 确保新增tab而不是替换现有内容
-        // 先检查是否已存在相同标题的内容，如果有则使用不同的标题
-        val existingTitles = toolWindow.contentManager.contents.map { it.displayName }
-        var finalTitle = uniqueTitle
-        var counter = 1
-        while (existingTitles.contains(finalTitle)) {
-            finalTitle = "$uniqueTitle (${counter++})"
-        }
-
-        // 如果标题被修改了，重新创建content
-        val finalContent = if (finalTitle != uniqueTitle) {
-            contentFactory.createContent(mainPanel, finalTitle, true).apply {
-                addPropertyChangeListener { evt ->
-                    if ("disposed" == evt.propertyName) {
-                        releaseEditor(editorHolder.editor)
-                    }
+            // 添加内容监听器，在内容移除时释放编辑器资源
+            content.addPropertyChangeListener { evt ->
+                if ("disposed" == evt.propertyName) {
+                    releaseEditor(editorHolder.editor)
                 }
             }
-        } else content
 
-        toolWindow.contentManager.addContent(finalContent)
+            toolWindow.contentManager.addContent(content)
+            toolWindow.contentManager.setSelectedContent(content)
 
-        // 激活新添加的tab
-        toolWindow.contentManager.setSelectedContent(finalContent)
+            // 记录详细的tab创建日志
+            val newTabCount = toolWindow.contentManager.contents.size
+            ProjectLogHelper.log(project, "核心搜索: 创建新tab keyword=$keyword items=${items.size} tab标题='$uniqueTitle' 当前tab总数=$newTabCount (之前=$currentTabCount)")
+
+            // 如果tab数量增加，记录警告日志
+            if (newTabCount > currentTabCount) {
+                ProjectLogHelper.log(project, "⚠️ 核心搜索: tab数量增加! keyword=$keyword 新增tab标题='$uniqueTitle' 当前tab总数=$newTabCount")
+            }
+        }
 
         // 显示工具窗口
         toolWindow.show(null)
         ProjectLogHelper.log(project, "核心搜索: 工具窗口已显示 keyword=$keyword items=${items.size}")
+    }
+
+    /**
+     * 查找已存在的核心搜索tab（按关键词匹配）
+     * @param toolWindow 工具窗口实例
+     * @param keyword 搜索关键词
+     * @return 如果找到匹配的tab则返回Content，否则返回null
+     */
+    private fun findExistingCoreSearchTab(toolWindow: com.intellij.openapi.wm.ToolWindow, keyword: String): com.intellij.ui.content.Content? {
+        val contents = toolWindow.contentManager.contents
+
+        // 记录当前所有tab的标题，用于调试
+        val allTabTitles = contents.map { it.displayName }
+        ProjectLogHelper.log(null, "核心搜索: 查找现有tab keyword=$keyword 当前所有tab标题=${allTabTitles.joinToString(", ")}")
+
+        for (content in contents) {
+            val displayName = content.displayName
+            // 检查是否是核心搜索tab且关键词匹配
+            if (displayName.startsWith("核心搜索: @") && displayName.contains("@$keyword")) {
+                ProjectLogHelper.log(null, "核心搜索: 找到匹配的现有tab keyword=$keyword tab标题='$displayName'")
+                return content
+            }
+        }
+
+        ProjectLogHelper.log(null, "核心搜索: 未找到匹配的现有tab keyword=$keyword")
+        return null
+    }
+
+    /**
+     * 跨异步更新现有tab的内容
+     * @param existingContent 现有的Content
+     * @param newMainPanel 新的主面板
+     * @param editorHolder 新的编辑器持有者对象（用于后续操作）
+     */
+    private fun updateExistingTabContent(
+        existingContent: com.intellij.ui.content.Content,
+        newMainPanel: JPanel,
+        editorHolder: Any
+    ) {
+        try {
+            // 在UI线程中执行更新操作，确保线程安全
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                try {
+                    // 1. 释放现有tab中的编辑器资源
+                    releaseExistingTabResources(existingContent)
+
+                    // 2. 短暂延迟，确保资源释放完成
+                    com.intellij.util.Alarm().addRequest({
+                        try {
+                            // 3. 更新tab内容
+                            existingContent.component = newMainPanel
+
+                            // 4. 强制刷新UI
+                            existingContent.component.revalidate()
+                            existingContent.component.repaint()
+
+                            // 5. 触发初始选择，确保预览正确显示
+                            triggerInitialSelection(newMainPanel)
+
+                            ProjectLogHelper.log(null, "核心搜索: 成功更新现有tab内容")
+                        } catch (updateEx: Throwable) {
+                            ProjectLogHelper.log(null, "核心搜索: 更新tab内容时出错: ${updateEx.message}")
+                        }
+                    }, 100) // 100ms延迟，确保资源释放完成
+
+                } catch (ex: Throwable) {
+                    ProjectLogHelper.log(null, "核心搜索: 准备更新tab内容时出错: ${ex.message}")
+                }
+            }
+        } catch (ex: Throwable) {
+            ProjectLogHelper.log(null, "核心搜索: 更新现有tab内容失败: ${ex.message}")
+        }
+    }
+
+    /**
+     * 释放现有tab中的编辑器资源
+     */
+    private fun releaseExistingTabResources(existingContent: com.intellij.ui.content.Content) {
+        try {
+            val component = existingContent.component
+            if (component is JPanel) {
+                // 递归查找并释放所有编辑器
+                releaseEditorsInComponent(component)
+            }
+        } catch (ex: Throwable) {
+            ProjectLogHelper.log(null, "核心搜索: 释放现有tab资源失败: ${ex.message}")
+        }
+    }
+
+    /**
+     * 递归查找并释放组件中的所有编辑器
+     */
+    private fun releaseEditorsInComponent(component: java.awt.Component) {
+        when (component) {
+            is com.intellij.openapi.editor.Editor ->
+                releaseEditor(component)
+            is javax.swing.JComponent -> {
+                // 递归处理子组件
+                for (child in component.components) {
+                    releaseEditorsInComponent(child)
+                }
+            }
+        }
+    }
+
+    /**
+     * 触发初始选择，确保预览正确显示
+     */
+    private fun triggerInitialSelection(mainPanel: JPanel) {
+        try {
+            // 查找树组件
+            val tree = findTreeComponent(mainPanel)
+            if (tree != null && tree.rowCount > 0) {
+                // 自动选择第一个节点来触发预览显示
+                val firstRow = 0
+                tree.setSelectionRow(firstRow)
+                val selectionEvent = javax.swing.event.TreeSelectionEvent(
+                    tree,
+                    tree.selectionPaths?.firstOrNull(),
+                    true,
+                    null,
+                    tree.selectionPaths?.firstOrNull()
+                )
+                // 手动触发选择监听器
+                for (listener in tree.treeSelectionListeners) {
+                    try {
+                        listener.valueChanged(selectionEvent)
+                    } catch (e: Throwable) {
+                        // 忽略监听器异常
+                    }
+                }
+            }
+        } catch (ex: Throwable) {
+            ProjectLogHelper.log(null, "核心搜索: 触发初始选择失败: ${ex.message}")
+        }
+    }
+
+    /**
+     * 从组件中查找树组件
+     */
+    private fun findTreeComponent(component: java.awt.Component): javax.swing.JTree? {
+        if (component is javax.swing.JTree) {
+            return component
+        }
+        if (component is javax.swing.JComponent) {
+            for (child in component.components) {
+                val tree = findTreeComponent(child)
+                if (tree != null) return tree
+            }
+        }
+        return null
     }
 
     /**
