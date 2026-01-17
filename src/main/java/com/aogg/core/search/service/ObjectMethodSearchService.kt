@@ -218,11 +218,11 @@ class ObjectMethodSearchService {
                 /* strict = */ false
             ) ?: continue
 
-            // 检查是否为真正的对象调用：classReference存在且以$开头（变量）
+            // 检查是否为真正的对象调用：通过->操作符识别对象调用
             val classReference = methodRef.classReference
             if (classReference != null) {
-                val className = classReference.text
-                if (className.isNotEmpty() && className.startsWith("$")) {
+                val methodRefText = methodRef.text
+                if (methodRefText.contains("->")) {
                     // 二次过滤：检查调用对象是否是当前类实例
                     if (isTargetClassInstance(classReference, targetClass)) {
                         // 是当前类的对象调用，保留
@@ -231,7 +231,7 @@ class ObjectMethodSearchService {
 
                         ProjectLogHelper.log(
                             element.project,
-                            "固定搜索-对象方法调用: filterRelatedObjectUsages 保留对象调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                            "固定搜索-对象方法调用: filterRelatedObjectUsages 保留对象调用 method=${uwt.targetMethodName}, methodRefText=$methodRefText, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
                         )
 
                         // 检查时间间隔或结果数量，如果超过5秒或累积了10个结果立即显示
@@ -245,14 +245,14 @@ class ObjectMethodSearchService {
                         // 调用对象不是当前类实例，跳过
                         ProjectLogHelper.log(
                             element.project,
-                            "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过非目标类实例调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                            "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过非目标类实例调用 method=${uwt.targetMethodName}, methodRefText=$methodRefText, targetClass=${targetClass.fqn} [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
                         )
                     }
                 } else {
                     // 静态调用（通过类名），跳过
                     ProjectLogHelper.log(
                         element.project,
-                        "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过静态调用 method=${uwt.targetMethodName}, classReference=$className [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
+                        "固定搜索-对象方法调用: filterRelatedObjectUsages 跳过静态调用 method=${uwt.targetMethodName}, methodRefText=$methodRefText [页${currentPage}/${totalPages}, 总量${totalItems}, 当前${currentItemIndex}]"
                     )
                 }
             } else {
