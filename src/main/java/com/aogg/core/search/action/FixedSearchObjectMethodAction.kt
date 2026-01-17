@@ -43,10 +43,9 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
 
-        // 检查是否处于 dumb mode（索引重建期间）
+        // 快速检查：如果处于 dumb mode，给出提示但仍然启动后台任务
         if (DumbService.isDumb(project)) {
-            FixedSearchHelper.notifyInfo(project, "正在重建索引，请稍后再试")
-            return
+            FixedSearchHelper.notifyInfo(project, "正在重建索引，搜索将在索引完成后开始")
         }
 
         val phpClass = FixedSearchHelper.resolvePhpClass(e) ?: run {
@@ -57,7 +56,21 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
         ProjectLogHelper.log(project, "固定搜索-对象方法调用: 开始搜索 class=${phpClass.fqn}")
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "固定搜索：对象方法调用", true) {
             override fun run(indicator: ProgressIndicator) {
-                performOptimizedObjectMethodSearch(project, indicator, phpClass)
+                // 在后台任务中等待索引完成
+                if (DumbService.isDumb(project)) {
+                    indicator.text = "等待索引重建完成..."
+                    try {
+                        // 使用正确的等待方法
+                        DumbService.getInstance(project).waitForSmartMode()
+                        indicator.text = "索引重建完成，开始搜索..."
+                    } catch (e: Exception) {
+                        ProjectLogHelper.log(project, "等待索引完成时发生异常: ${e.message}")
+                        // 如果等待失败，尝试直接继续，但会增加重试次数
+                    }
+                }
+
+                // 执行搜索，包含重试机制
+                performObjectMethodSearchWithRetry(project, indicator, phpClass)
             }
         })
     }
@@ -117,6 +130,11 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
 
             ProjectLogHelper.log(project, "固定搜索-对象方法调用: 搜索完成，找到 ${cumulativeUsages.size} 个对象方法调用")
 
+        } catch (ex: com.intellij.openapi.project.IndexNotReadyException) {
+            ProjectLogHelper.log(project, "固定搜索-对象方法调用: 索引未准备好，搜索被中断")
+            ApplicationManager.getApplication().invokeLater {
+                FixedSearchHelper.notifyInfo(project, "索引重建中，请稍后再试")
+            }
         } catch (ex: Throwable) {
             ProjectLogHelper.log(project, "固定搜索-对象方法调用: 搜索异常 ${ex.message}")
             ApplicationManager.getApplication().invokeLater {
@@ -152,43 +170,49 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
         project: Project,
         cumulativeUsages: MutableList<UsageWithTarget>
     ) {
-        val methodRefsIterator = RefSearch.search(method, searchScope, false).iterator()
+        try {
+            val methodRefsIterator = RefSearch.search(method, searchScope, false).iterator()
 
-        // 引用级分批：每次处理 referenceBatchSize 个引用，避免内存占用过高
-        while (methodRefsIterator.hasNext()) {
-            ApplicationManager.getApplication().runReadAction {
-                val referenceBatch = mutableListOf<UsageWithTarget>()
+            // 引用级分批：每次处理 referenceBatchSize 个引用，避免内存占用过高
+            while (methodRefsIterator.hasNext()) {
+                ApplicationManager.getApplication().runReadAction {
+                    val referenceBatch = mutableListOf<UsageWithTarget>()
 
-                // 收集一批引用
-                for (i in 0 until referenceBatchSize) {
-                    if (!methodRefsIterator.hasNext()) break
+                    // 收集一批引用
+                    for (i in 0 until referenceBatchSize) {
+                        if (!methodRefsIterator.hasNext()) break
 
-                    val ref = methodRefsIterator.next()
-                    val element = ref.element
-                    val methodRef = PsiTreeUtil.getParentOfType(
-                        element,
-                        MethodReference::class.java,
-                        false
-                    )
+                        val ref = methodRefsIterator.next()
+                        val element = ref.element
+                        val methodRef = PsiTreeUtil.getParentOfType(
+                            element,
+                            MethodReference::class.java,
+                            false
+                        )
 
-                    if (methodRef != null) {
-                        val range = ref.rangeInElement
-                        referenceBatch.add(UsageWithTarget(
-                            UsageInfo(element, range.startOffset, range.endOffset, true),
-                            "对象调用 — ${method.name}()（定义: $className）"
-                        ))
+                        if (methodRef != null) {
+                            val range = ref.rangeInElement
+                            referenceBatch.add(UsageWithTarget(
+                                UsageInfo(element, range.startOffset, range.endOffset, true),
+                                "对象调用 — ${method.name}()（定义: $className）"
+                            ))
+                        }
+                    }
+
+                    // 过滤当前引用批次
+                    if (referenceBatch.isNotEmpty()) {
+                        filterRelatedObjectUsages(referenceBatch, targetClass, project, cumulativeUsages)
                     }
                 }
 
-                // 过滤当前引用批次
-                if (referenceBatch.isNotEmpty()) {
-                    filterRelatedObjectUsages(referenceBatch, targetClass, project, cumulativeUsages)
-                }
+                // 在引用批次间yield，让UI有更多响应机会
+                ProgressManager.checkCanceled()
+                Thread.sleep(1)
             }
-
-            // 在引用批次间yield，让UI有更多响应机会
-            ProgressManager.checkCanceled()
-            Thread.sleep(1)
+        } catch (ex: com.intellij.openapi.project.IndexNotReadyException) {
+            // 索引未准备好，跳过此方法的搜索
+            ProjectLogHelper.log(project, "固定搜索-对象方法调用: 方法 ${method.name} 的搜索被跳过，索引未准备好")
+            return
         }
     }
 
@@ -242,6 +266,46 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
                     showUsagesInStandardView(project, currentUsages)
                 }
             }
+        }
+    }
+
+    /**
+     * 执行对象方法搜索，包含重试机制
+     */
+    private fun performObjectMethodSearchWithRetry(project: Project, indicator: ProgressIndicator, targetClass: PhpClass) {
+        val maxRetries = 3
+        var currentRetry = 0
+        var lastException: Exception? = null
+
+        while (currentRetry < maxRetries) {
+            try {
+                performOptimizedObjectMethodSearch(project, indicator, targetClass)
+                return // 成功执行，退出重试循环
+            } catch (ex: com.intellij.openapi.project.IndexNotReadyException) {
+                lastException = ex
+                currentRetry++
+
+                if (currentRetry < maxRetries) {
+                    ProjectLogHelper.log(project, "固定搜索-对象方法调用: 第${currentRetry}次重试，等待索引准备...")
+                    indicator.text = "索引未准备好，正在重试 (${currentRetry}/${maxRetries})..."
+
+                    try {
+                        // 等待一小段时间，让索引有机会准备好
+                        Thread.sleep((500 * currentRetry).toLong()) // 递增等待时间
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                }
+            } catch (ex: Exception) {
+                // 其他异常不重试，直接抛出
+                throw ex
+            }
+        }
+
+        // 如果重试多次仍然失败，抛出最后一个异常
+        if (lastException != null) {
+            throw lastException
         }
     }
 

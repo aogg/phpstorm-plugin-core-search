@@ -112,11 +112,9 @@ class SearchFilterHelper(private val searchTypeName: String) {
         if (variableName.startsWith("$")) {
             val varName = variableName.substring(1)
 
-            // 启发式检查：变量名是否包含类名的简化形式
+            // 启发式检查：只进行精确匹配，避免误匹配
             val className = targetClass.name ?: ""
-            if (varName.contains(className.lowercase()) ||
-                className.lowercase().contains(varName) ||
-                varName == className.lowercase()) {
+            if (varName == className.lowercase()) {
                 return true
             }
 
