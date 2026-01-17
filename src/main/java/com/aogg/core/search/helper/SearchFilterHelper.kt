@@ -3,10 +3,8 @@ package com.aogg.core.search.helper
 import com.aogg.core.search.model.UsageWithTarget
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.jetbrains.php.lang.psi.elements.PhpExpression
-import com.jetbrains.php.lang.psi.elements.AssignmentExpression
-import com.jetbrains.php.lang.psi.elements.NewExpression
 import com.jetbrains.php.lang.psi.elements.Method
-import com.jetbrains.php.lang.psi.elements.Function
+import com.jetbrains.php.lang.psi.resolve.types.PhpType
 import com.jetbrains.php.PhpIndex
 import com.intellij.psi.util.PsiTreeUtil
 
@@ -103,65 +101,45 @@ class SearchFilterHelper(private val searchTypeName: String) {
 
     /**
      * 检查变量是否是目标类的实例
+     * 使用 IntelliJ 平台的内置类型推断能力，直接获取变量的推断类型
      */
     fun isTargetClassInstance(classReference: PhpExpression, targetClass: PhpClass): Boolean {
-        val project = targetClass.project
         val targetClassFqn = targetClass.fqn ?: return false
 
-        val variableName = classReference.text
-        if (variableName.startsWith("$")) {
-            val varName = variableName.substring(1)
-
-            // 启发式检查：只进行精确匹配，避免误匹配
-            val className = targetClass.name ?: ""
-            if (varName == className.lowercase()) {
-                return true
-            }
-
-            // 检查当前作用域内是否有相关的new表达式或赋值
-            val containingMethod = PsiTreeUtil.getParentOfType(classReference, Method::class.java)
-            val containingFunction = PsiTreeUtil.getParentOfType(classReference, Function::class.java)
-
-            val searchScope = containingMethod ?: containingFunction
-            if (searchScope != null) {
-                val assignments = PsiTreeUtil.findChildrenOfType(searchScope, AssignmentExpression::class.java)
-                for (assignment in assignments) {
-                    val variable = assignment.variable
-                    if (variable?.text == variableName) {
-                        val value = assignment.value
-                        if (value is NewExpression) {
-                            val newClassReference = value.classReference
-                            if (newClassReference != null) {
-                                val newClassFqn = resolveClassFqn(newClassReference, project)
-                                if (newClassFqn != null && newClassFqn == targetClassFqn) {
-                                    return true
-                                }
-                            }
-                        }
-                    }
+        try {
+            // 使用 IntelliJ 平台的内置类型推断
+            val inferredType = classReference.getType()
+            if (inferredType != null) {
+                // 检查推断类型是否包含目标类
+                val isTargetType = inferredType.toString().contains(targetClassFqn)
+                if (isTargetType) {
+                    return true
+                } else {
+                    // 不是目标类的实例，直接忽略，记录日志
+                    ProjectLogHelper.log(
+                        targetClass.project,
+                        "$searchTypeName: 忽略非目标类实例调用 inferredType=${inferredType}, targetClass=${targetClass.fqn}"
+                    )
+                    return false
                 }
-
-                // 查找参数声明
-                if (containingMethod != null) {
-                    val parameters = containingMethod.parameters
-                    for (parameter in parameters) {
-                        val parameterName = "$" + parameter.name
-                        if (parameterName == variableName) {
-                            val parameterType = parameter.declaredType
-                            if (parameterType != null) {
-                                val typeString = parameterType.toString()
-                                if (typeString.contains(targetClassFqn)) {
-                                    return true
-                                }
-                            }
-                        }
-                    }
-                }
+            } else {
+                // 类型推断返回null，直接忽略，记录日志
+                ProjectLogHelper.log(
+                    targetClass.project,
+                    "$searchTypeName: 类型推断返回null，忽略此调用 classReference=${classReference.text}"
+                )
+                return false
             }
+        } catch (e: Exception) {
+            // 类型推断失败，直接忽略，记录日志
+            ProjectLogHelper.log(
+                targetClass.project,
+                "$searchTypeName: 类型推断失败，忽略此调用，错误: ${e.message}, classReference=${classReference.text}"
+            )
+            return false
         }
-
-        return false
     }
+
 
     /**
      * 解析类引用的FQN

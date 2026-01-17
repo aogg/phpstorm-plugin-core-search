@@ -1,0 +1,467 @@
+package com.aogg.core.search.helper
+
+import com.aogg.core.search.model.UsageWithTarget
+import com.jetbrains.php.lang.psi.elements.PhpClass
+import com.jetbrains.php.lang.psi.elements.PhpExpression
+import com.jetbrains.php.lang.psi.elements.AssignmentExpression
+import com.jetbrains.php.lang.psi.elements.NewExpression
+import com.jetbrains.php.lang.psi.elements.Method
+import com.jetbrains.php.lang.psi.elements.Function
+import com.jetbrains.php.lang.psi.resolve.types.PhpType
+import com.jetbrains.php.PhpIndex
+import com.intellij.psi.util.PsiTreeUtil
+
+/**
+ * 搜索过滤助手类
+ * 提供通用的搜索过滤和日志记录功能，可被不同类型的搜索复用
+ */
+class SearchFilterHelper(private val searchTypeName: String) {
+
+    /**
+     * 过滤相关调用并记录日志
+     * @param usagesWithTarget 待过滤的使用列表
+     * @param targetClass 目标类
+     * @param project 项目实例
+     * @param cumulativeUsages 累积结果列表
+     * @param lastDisplayTime 上次显示时间
+     * @param hasNewResultsInBatch 批次是否有新结果的标记
+     * @param showIncrementalResults 增量显示回调函数
+     * @return Triple(更新后的lastDisplayTime, hasNewResultsInBatch, 是否有新结果)
+     */
+    fun filterRelatedObjectUsages(
+        usagesWithTarget: List<UsageWithTarget>,
+        targetClass: PhpClass,
+        project: com.intellij.openapi.project.Project,
+        cumulativeUsages: MutableList<UsageWithTarget>,
+        lastDisplayTime: Long,
+        hasNewResultsInBatch: Boolean,
+        showIncrementalResults: (List<UsageWithTarget>) -> Unit
+    ): Triple<Long, Boolean, Boolean> {
+        var currentLastDisplayTime = lastDisplayTime
+        var currentHasNewResults = hasNewResultsInBatch
+        var batchHasNewResults = false
+
+        for (uwt in usagesWithTarget) {
+            val usage = uwt.usageInfo
+            val element = usage.element ?: continue
+
+            // 查找包含此元素的方法引用
+            val methodRef = PsiTreeUtil.getParentOfType(
+                element,
+                com.jetbrains.php.lang.psi.elements.MethodReference::class.java,
+                false
+            ) ?: continue
+
+            // 检查是否为真正的对象调用：classReference存在且以$开头（变量）
+            val classReference = methodRef.classReference
+            if (classReference != null) {
+                val className = classReference.text
+                if (className.isNotEmpty() && className.startsWith("$")) {
+                    // 二次过滤：检查调用对象是否是当前类实例
+                    if (isTargetClassInstance(classReference, targetClass)) {
+                        // 是当前类的对象调用，保留
+                        cumulativeUsages.add(uwt)
+                        currentHasNewResults = true
+                        batchHasNewResults = true
+
+                        ProjectLogHelper.log(
+                            element.project,
+                            "$searchTypeName: filterRelatedObjectUsages 保留对象调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn}"
+                        )
+
+                        // 检查时间间隔或结果数量，如果超过5秒或累积了10个结果立即显示
+                        val currentTime = System.currentTimeMillis()
+                        if (currentTime - currentLastDisplayTime > 5000 || cumulativeUsages.size % 10 == 0) { // 5秒或每10个结果
+                            showIncrementalResults(cumulativeUsages.toList())
+                            currentLastDisplayTime = currentTime
+                            currentHasNewResults = false // 重置标记，因为已经显示了
+                        }
+                    } else {
+                        // 调用对象不是当前类实例，跳过
+                        ProjectLogHelper.log(
+                            element.project,
+                            "$searchTypeName: filterRelatedObjectUsages 跳过非目标类实例调用 method=${uwt.targetMethodName}, classReference=$className, targetClass=${targetClass.fqn}"
+                        )
+                    }
+                } else {
+                    // 静态调用（通过类名），跳过
+                    ProjectLogHelper.log(
+                        element.project,
+                        "$searchTypeName: filterRelatedObjectUsages 跳过静态调用 method=${uwt.targetMethodName}, classReference=$className"
+                    )
+                }
+            } else {
+                // 没有classReference，可能不是方法调用，跳过
+                ProjectLogHelper.log(
+                    element.project,
+                    "$searchTypeName: filterRelatedObjectUsages 跳过无classReference的调用 method=${uwt.targetMethodName}"
+                )
+            }
+        }
+
+        return Triple(currentLastDisplayTime, currentHasNewResults, batchHasNewResults)
+    }
+
+    /**
+     * 检查变量是否是目标类的实例
+     * 使用 IntelliJ 平台的内置类型推断能力，直接获取变量的推断类型
+     */
+    fun isTargetClassInstance(classReference: PhpExpression, targetClass: PhpClass): Boolean {
+        val targetClassFqn = targetClass.fqn ?: return false
+
+        try {
+            // 使用 IntelliJ 平台的内置类型推断
+            val inferredType = classReference.getType()
+            if (inferredType != null) {
+                // 检查推断类型是否包含目标类
+                return inferredType.contains(targetClassFqn)
+            }
+        } catch (e: Exception) {
+            // 类型推断失败，回退到启发式检查
+            ProjectLogHelper.log(
+                targetClass.project,
+                "$searchTypeName: 类型推断失败，使用启发式检查，错误: ${e.message}"
+            )
+        }
+
+        // 回退到启发式检查：变量名是否等于类名的小写形式
+        return isHeuristicClassMatch(classReference, targetClass)
+    }
+
+    /**
+     * 启发式检查：变量名是否等于类名的小写形式
+     * 作为类型推断失败时的后备方案
+     */
+    private fun isHeuristicClassMatch(classReference: PhpExpression, targetClass: PhpClass): Boolean {
+        val variableName = classReference.text
+        if (variableName.startsWith("$")) {
+            val varName = variableName.substring(1)
+            val className = targetClass.name ?: ""
+            return varName == className.lowercase()
+        }
+        return false
+    }
+
+    /**
+     * 解析类引用的FQN
+     */
+    fun resolveClassFqn(classReference: PhpExpression, project: com.intellij.openapi.project.Project): String? {
+        val assignments = PsiTreeUtil.findChildrenOfType(searchScope, AssignmentExpression::class.java)
+        for (assignment in assignments) {
+            val variable = assignment.variable
+            if (variable?.text == variableName) {
+                val value = assignment.value
+                if (value is NewExpression) {
+                    val newClassReference = value.classReference
+                    if (newClassReference != null) {
+                        val newClassFqn = resolveClassFqn(newClassReference, project)
+                        if (newClassFqn != null && newClassFqn == targetClassFqn) {
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 检查变量赋值链（递归追踪变量间的赋值关系）
+     * 例如：$user = $this->user; 或 $obj = $anotherObj;
+     */
+    private fun checkVariableAssignmentChain(
+        searchScope: com.intellij.psi.PsiElement,
+        variableName: String,
+        targetClassFqn: String,
+        project: com.intellij.openapi.project.Project,
+        visitedVariables: MutableSet<String>
+    ): Boolean {
+        // 防止无限递归
+        if (visitedVariables.contains(variableName)) return false
+        visitedVariables.add(variableName)
+
+        val assignments = PsiTreeUtil.findChildrenOfType(searchScope, AssignmentExpression::class.java)
+        for (assignment in assignments) {
+            val variable = assignment.variable
+            if (variable?.text == variableName) {
+                val value = assignment.value
+
+                // 检查是否赋值给另一个变量
+                if (value is com.jetbrains.php.lang.psi.elements.Variable) {
+                    val sourceVarName = value.text
+                    // 递归检查源变量
+                    if (checkVariableAssignmentChain(searchScope, sourceVarName, targetClassFqn, project, visitedVariables)) {
+                        return true
+                    }
+                }
+
+                // 检查属性访问 ($obj = $this->property 或 $obj = $var->property)
+                if (value is com.jetbrains.php.lang.psi.elements.FieldReference) {
+                    if (checkFieldReferenceType(value, targetClassFqn, project)) {
+                        return true
+                    }
+                }
+
+                // 检查数组访问 ($obj = $array[$key])
+                if (value is com.jetbrains.php.lang.psi.elements.ArrayAccessExpression) {
+                    // 这里可以添加更复杂的数组类型推断逻辑
+                    // 暂时跳过，未来可以扩展
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 检查方法返回值赋值
+     */
+    private fun checkMethodReturnAssignment(searchScope: com.intellij.psi.PsiElement, variableName: String, targetClassFqn: String, project: com.intellij.openapi.project.Project): Boolean {
+        val assignments = PsiTreeUtil.findChildrenOfType(searchScope, AssignmentExpression::class.java)
+        for (assignment in assignments) {
+            val variable = assignment.variable
+            if (variable?.text == variableName) {
+                val value = assignment.value
+
+                // 检查方法调用返回值
+                if (value is com.jetbrains.php.lang.psi.elements.MethodReference) {
+                    if (checkMethodReferenceReturnType(value, targetClassFqn, project)) {
+                        return true
+                    }
+                }
+
+                // 检查函数调用返回值
+                if (value is com.jetbrains.php.lang.psi.elements.FunctionReference) {
+                    if (checkFunctionReferenceReturnType(value, targetClassFqn, project)) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 检查字段引用的类型
+     */
+    private fun checkFieldReferenceType(fieldRef: com.jetbrains.php.lang.psi.elements.FieldReference, targetClassFqn: String, project: com.intellij.openapi.project.Project): Boolean {
+        // 检查 $this->property 的情况
+        val classReference = fieldRef.classReference
+        if (classReference?.text == "\$this") {
+            // 检查当前类是否有匹配的属性类型
+            val fieldName = fieldRef.name ?: return false
+            val containingClass = PsiTreeUtil.getParentOfType(fieldRef, PhpClass::class.java)
+            if (containingClass != null) {
+                val fields = containingClass.fields
+                for (field in fields) {
+                    if (field.name == fieldName) {
+                        val fieldType = field.declaredType
+                        if (fieldType != null) {
+                            val typeString = fieldType.toString()
+                            if (typeString.contains(targetClassFqn)) {
+                                return true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 检查方法引用的返回类型
+     */
+    private fun checkMethodReferenceReturnType(methodRef: com.jetbrains.php.lang.psi.elements.MethodReference, targetClassFqn: String, project: com.intellij.openapi.project.Project): Boolean {
+        try {
+            val methodName = methodRef.name ?: return false
+            val classReference = methodRef.classReference
+
+            if (classReference != null) {
+                val classFqn = resolveClassFqn(classReference, project)
+                if (classFqn != null) {
+                    val phpIndex = PhpIndex.getInstance(project)
+                    val classes = phpIndex.getAnyByFQN(classFqn)
+                    for (phpClass in classes) {
+                        if (phpClass is PhpClass) {
+                            val methods = phpClass.findMethodsByName(methodName)
+                            for (method in methods) {
+                                val returnType = method.returnType
+                                if (returnType != null) {
+                                    val typeString = returnType.toString()
+                                    if (typeString.contains(targetClassFqn)) {
+                                        return true
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // 忽略类型解析错误
+        }
+        return false
+    }
+
+    /**
+     * 检查函数引用的返回类型
+     */
+    private fun checkFunctionReferenceReturnType(functionRef: com.jetbrains.php.lang.psi.elements.FunctionReference, targetClassFqn: String, project: com.intellij.openapi.project.Project): Boolean {
+        try {
+            val functionName = functionRef.name ?: return false
+            val phpIndex = PhpIndex.getInstance(project)
+            val functions = phpIndex.getFunctionsByName(functionName)
+            for (function in functions) {
+                val returnType = function.returnType
+                if (returnType != null) {
+                    val typeString = returnType.toString()
+                    if (typeString.contains(targetClassFqn)) {
+                        return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // 忽略类型解析错误
+        }
+        return false
+    }
+
+    /**
+     * 检查参数类型声明
+     */
+    private fun checkParameterType(method: Method, variableName: String, targetClassFqn: String): Boolean {
+        val parameters = method.parameters
+        for (parameter in parameters) {
+            val parameterName = "$" + parameter.name
+            if (parameterName == variableName) {
+                val parameterType = parameter.declaredType
+                if (parameterType != null) {
+                    // 更准确的类型检查：检查类型的FQN而不是简单的字符串包含
+                    val typeFqn = resolveTypeFqn(parameterType, method.project)
+                    if (typeFqn == targetClassFqn) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 检查属性访问赋值
+     */
+    private fun checkPropertyAccessAssignment(searchScope: com.intellij.psi.PsiElement, variableName: String, targetClassFqn: String, project: com.intellij.openapi.project.Project): Boolean {
+        val assignments = PsiTreeUtil.findChildrenOfType(searchScope, AssignmentExpression::class.java)
+        for (assignment in assignments) {
+            val variable = assignment.variable
+            if (variable?.text == variableName) {
+                val value = assignment.value
+                if (value is com.jetbrains.php.lang.psi.elements.FieldReference) {
+                    if (checkFieldReferenceType(value, targetClassFqn, project)) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 解析类型为FQN
+     */
+    private fun resolveTypeFqn(type: com.jetbrains.php.lang.psi.resolve.types.PhpType, project: com.intellij.openapi.project.Project): String? {
+        try {
+            val phpIndex = PhpIndex.getInstance(project)
+            val typeString = type.toString()
+
+            // 尝试直接解析FQN
+            val classes = phpIndex.getAnyByFQN(typeString)
+            if (classes.isNotEmpty()) {
+                return typeString
+            }
+
+            // 尝试解析类名
+            val classesByName = phpIndex.getClassesByName(typeString)
+            for (phpClass in classesByName) {
+                if (phpClass is PhpClass) {
+                    return phpClass.fqn
+                }
+            }
+        } catch (e: Exception) {
+            // 忽略解析错误
+        }
+        return null
+    }
+
+    /**
+     * 解析类引用的FQN
+     */
+    fun resolveClassFqn(classReference: PhpExpression, project: com.intellij.openapi.project.Project): String? {
+        // 检查是否处于 dumb mode（索引重建期间）
+        if (com.intellij.openapi.project.DumbService.isDumb(project)) {
+            return null
+        }
+
+        try {
+            val phpIndex = PhpIndex.getInstance(project)
+            val className = classReference.text
+
+            val resolvedClassesByFQN = phpIndex.getAnyByFQN(className)
+            for (resolvedClass in resolvedClassesByFQN) {
+                if (resolvedClass is PhpClass) {
+                    return resolvedClass.fqn
+                }
+            }
+
+            val classesByName = phpIndex.getClassesByName(className)
+            for (resolvedClass in classesByName) {
+                if (resolvedClass is PhpClass) {
+                    return resolvedClass.fqn
+                }
+            }
+
+            return null
+        } catch (ex: com.intellij.openapi.project.IndexNotReadyException) {
+            // 索引未准备好，返回null，让调用方处理
+            ProjectLogHelper.log(project, "$searchTypeName: resolveClassFqn 索引未准备好，跳过解析 classReference=${classReference.text}")
+            return null
+        }
+    }
+
+    /**
+     * 收集对象方法（非静态方法）
+     */
+    fun collectObjectMethods(phpClass: PhpClass, result: MutableSet<Pair<Method, String>>, visited: MutableSet<String>) {
+        val fqn = phpClass.fqn ?: return
+        if (visited.contains(fqn)) return
+        visited.add(fqn)
+
+        // 添加当前类的非静态方法
+        val currentMethods = phpClass.methods.filter { !it.modifier.isStatic && !it.access.isPrivate }
+        for (method in currentMethods) {
+            result.add(Pair(method, phpClass.name ?: "当前类"))
+        }
+
+        // 递归收集父类的非静态方法
+        val superClass = phpClass.superClass
+        if (superClass != null) {
+            collectObjectMethods(superClass, result, visited)
+        }
+    }
+
+    companion object {
+        /**
+         * 为对象方法调用搜索创建过滤助手
+         */
+        fun forObjectMethodSearch(): SearchFilterHelper {
+            return SearchFilterHelper("固定搜索-对象方法调用")
+        }
+
+        /**
+         * 为其他类型的搜索创建过滤助手
+         */
+        fun forSearchType(searchTypeName: String): SearchFilterHelper {
+            return SearchFilterHelper(searchTypeName)
+        }
+    }
+}
