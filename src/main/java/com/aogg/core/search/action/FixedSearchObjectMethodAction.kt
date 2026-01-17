@@ -15,6 +15,9 @@ import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.DumbService
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationType
+import com.intellij.notification.Notifications
 import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.jetbrains.php.lang.psi.elements.PhpExpression
@@ -259,12 +262,19 @@ class FixedSearchObjectMethodAction : AnAction("对象方法调用", "搜索对�
             try {
                 AutoDiscoverUiHelper.showAutoDiscoverToolWindow(project, currentUsages, "固定搜索-对象方法调用")
             } catch (ex: Throwable) {
-                try {
-                    val fallbackUsages = currentUsages.map { com.intellij.usages.UsageInfo2UsageAdapter(it.usageInfo) as com.intellij.usages.Usage }
-                    AutoDiscoverUiHelper.showCustomUsagesPopup(project, fallbackUsages, "固定搜索-对象方法调用")
-                } catch (exPopup: Throwable) {
-                    showUsagesInStandardView(project, currentUsages)
-                }
+                // 记录详细错误日志
+                ProjectLogHelper.log(project, "固定搜索-对象方法调用: 显示搜索结果失败，错误: ${ex.message}, 异常类型: ${ex.javaClass.simpleName}")
+
+                // 显示错误通知给用户
+                Notifications.Bus.notify(
+                    Notification(
+                        "core-search",
+                        "固定搜索-对象方法调用",
+                        "显示搜索结果失败: ${ex.message}",
+                        NotificationType.ERROR
+                    ),
+                    project
+                )
             }
         }
     }
