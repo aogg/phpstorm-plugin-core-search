@@ -751,10 +751,15 @@ object AutoDiscoverUiHelper {
                 MethodReference::class.java,
                 /* strict = */ false
             )
-            val targetMethodName = try {
-                (methodRef?.resolve() as? Method)?.name ?: "<unknown-target>"
-            } catch (_: Throwable) {
-                "<unknown-target>"
+            // 优先使用传入的 targetMethodName（常量搜索等场景），否则通过 PSI 解析
+            val targetMethodName = if (uwt.targetMethodName.isNotEmpty() && uwt.targetMethodName != "<unknown-target>") {
+                uwt.targetMethodName
+            } else {
+                try {
+                    (methodRef?.resolve() as? Method)?.name ?: "<unknown-target>"
+                } catch (_: Throwable) {
+                    "<unknown-target>"
+                }
             }
             val callerMethodName = PsiTreeUtil.getParentOfType(element, Method::class.java)?.name ?: "<no-method>"
 

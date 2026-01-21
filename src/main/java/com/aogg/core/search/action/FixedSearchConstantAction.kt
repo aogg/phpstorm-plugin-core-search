@@ -197,19 +197,22 @@ class FixedSearchConstantAction : AnAction("常量", "搜索常量使用", null)
                         continue
                     }
 
-                    // 获取常量名称和类名
+                    // 获取常量名称（用于分组显示）
                     val constantName = when (constant) {
                         is Constant -> constant.name
                         is Field -> constant.name
                         else -> "UNKNOWN"
                     }
+
+                    // 获取类名（用于日志记录）
                     val className = when (constant) {
                         is Constant -> (constant.parent as? PhpClass)?.name
                         is Field -> constant.containingClass?.name
                         else -> "UNKNOWN"
                     }
 
-                    val targetConstantName = "${className}::${constantName}"
+                    // 第一级分组只使用常量名，不包含类名
+                    val targetConstantName = constantName
                     val filePath = element.containingFile?.virtualFile?.path ?: "UNKNOWN"
                     val lineNumber = element.containingFile?.let { file ->
                         PsiDocumentManager.getInstance(project).getDocument(file)?.getLineNumber(element.textOffset)
