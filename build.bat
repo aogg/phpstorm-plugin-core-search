@@ -1,3 +1,4 @@
 @echo off
-cd /d d:\code\www\my\github\phpstorm-plugin-core-search
+
+cd /d %~dp0
 .\gradlew.bat buildPlugin
